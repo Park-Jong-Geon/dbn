@@ -8,8 +8,9 @@ pip install easydict
 pip install einops
 pip install scikit-learn
 pip install seaborn
-pip install jax==0.4.3 -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-pip install jaxlib==0.4.3+cuda11.cudnn82 -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-# pip install jax[tpu]==0.4.3 -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+# pip install jax==0.4.3 -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+# pip install jaxlib==0.4.3+cuda11.cudnn82 -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+pip install jax[tpu]==0.4.3 -f https://storage.googleapis.com/jax-releases/libtpu_releases.html # Must manually download jaxlib==0.4.3
 pip install optax==0.1.4
 pip install chex==0.1.6
+pip install scipy==1.11.1 # NumPy==1.26.4 required
