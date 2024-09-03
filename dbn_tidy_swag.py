@@ -463,7 +463,7 @@ def dsb_sample_cont(score, rng, x0, y0=None, config=None, dsb_stats=None, z_dsb_
     _, _, x_list = val
     return jnp.concatenate(x_list, axis=0)
 
-def sample_swag_params(rng, resnet_state, num_samples):        
+def sample_swag_params(rng, resnet_state, num_samples):     
     d = resnet_state['model']['opt_state']['1']
     swag_state = namedtuple('SWAGState', d.keys())(*d.values())
     samples_rng = jax.random.split(rng, num_samples)

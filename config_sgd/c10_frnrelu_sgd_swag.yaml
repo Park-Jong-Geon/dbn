@@ -9,4 +9,4 @@ optim_lr: 0.1
 optim_weight_decay: 0.001
 optim: sgd
 freq: 1
-rank: 1000
+rank: 200

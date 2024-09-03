@@ -471,54 +471,47 @@ def launch(config, print_fn):
         # ---------------------------------------------------------------------- #
         # Save
         # ---------------------------------------------------------------------- #
-        if config.bezier:
-            test_condition = best_acc > val_summarized["val/loss"]
-        # elif config.ens_dist:
-        #     test_condition = best_acc > val_summarized["val/loss"]
-        else:
-            test_condition = best_acc < val_summarized["val/acc"]
-        if test_condition:
-            tst_metric = []
-            tst_loader = dataloaders['tst_loader'](rng=None)
-            tst_loader = jax_utils.prefetch_to_device(tst_loader, size=2)
-            for batch_idx, batch in enumerate(tst_loader, start=1):
-                metrics = p_step_val(state, batch)
-                # if best_acc == 0 and batch_idx == 1:
-                #     sbatch = get_single_batch(batch)
-                #     sstate = jax_utils.unreplicate(state)
-                #     wallclock_metrics = measure_wallclock(sstate, sbatch)
-                #     print("wall clock time", wallclock_metrics["sec"], "sec")
-                tst_metric.append(metrics)
-            tst_metric = common_utils.get_metrics(tst_metric)
-            tst_summarized = {
-                f'tst/{k}': v for k, v in jax.tree_util.tree_map(lambda e: e.sum(), tst_metric).items()}
-            tst_summarized['tst/loss'] /= tst_summarized['tst/cnt']
-            tst_summarized['tst/acc'] /= tst_summarized['tst/cnt']
-            tst_summarized['tst/nll'] /= tst_summarized['tst/cnt']
-            tst_summarized['tst/sec'] /= tst_summarized['tst/cnt']
-            del tst_summarized["tst/cnt"]
-            wl.log(tst_summarized)
-            best_acc = val_summarized["val/acc"]
-            # if config.bezier:
-            #     best_acc = val_summarized["val/loss"]
-            # # elif config.ens_dist:
-            # #     best_acc = val_summarized["val/loss"]
-            # else:
-            #     best_acc = val_summarized["val/acc"]
+        tst_metric = []
+        tst_loader = dataloaders['tst_loader'](rng=None)
+        tst_loader = jax_utils.prefetch_to_device(tst_loader, size=2)
+        for batch_idx, batch in enumerate(tst_loader, start=1):
+            metrics = p_step_val(state, batch)
+            # if best_acc == 0 and batch_idx == 1:
+            #     sbatch = get_single_batch(batch)
+            #     sstate = jax_utils.unreplicate(state)
+            #     wallclock_metrics = measure_wallclock(sstate, sbatch)
+            #     print("wall clock time", wallclock_metrics["sec"], "sec")
+            tst_metric.append(metrics)
+        tst_metric = common_utils.get_metrics(tst_metric)
+        tst_summarized = {
+            f'tst/{k}': v for k, v in jax.tree_util.tree_map(lambda e: e.sum(), tst_metric).items()}
+        tst_summarized['tst/loss'] /= tst_summarized['tst/cnt']
+        tst_summarized['tst/acc'] /= tst_summarized['tst/cnt']
+        tst_summarized['tst/nll'] /= tst_summarized['tst/cnt']
+        tst_summarized['tst/sec'] /= tst_summarized['tst/cnt']
+        del tst_summarized["tst/cnt"]
+        wl.log(tst_summarized)
+        best_acc = val_summarized["val/acc"]
+        # if config.bezier:
+        #     best_acc = val_summarized["val/loss"]
+        # # elif config.ens_dist:
+        # #     best_acc = val_summarized["val/loss"]
+        # else:
+        #     best_acc = val_summarized["val/acc"]
 
-            if config.save:
-                save_state = jax_utils.unreplicate(state)
-                # if config.bezier:
-                #     save_state = save_state.replace(
-                #         params=theta_be(save_state.params, 0.5))
-                ckpt = dict(model=save_state, config=vars(
-                    config), best_acc=best_acc)
-                orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-                checkpoints.save_checkpoint(ckpt_dir=config.save,
-                                            target=ckpt,
-                                            step=epoch_idx,
-                                            overwrite=True,
-                                            orbax_checkpointer=orbax_checkpointer)
+        if config.save:
+            save_state = jax_utils.unreplicate(state)
+            # if config.bezier:
+            #     save_state = save_state.replace(
+            #         params=theta_be(save_state.params, 0.5))
+            ckpt = dict(model=save_state, config=vars(
+                config), best_acc=best_acc)
+            orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+            checkpoints.save_checkpoint(ckpt_dir=config.save,
+                                        target=ckpt,
+                                        step=epoch_idx,
+                                        overwrite=True,
+                                        orbax_checkpointer=orbax_checkpointer)
         wl.flush()
 
         # wait until computations are done
