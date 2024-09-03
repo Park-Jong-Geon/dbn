@@ -285,7 +285,7 @@ def get_score_input_dim(config):
     return score_input_dim
 
 
-def split_base_cls(resnet_param_list,
+def split_base_cls(variables, resnet_param_list,
                    base_param_keys, res_param_keys, cls_param_keys,
                    base_batch_keys=None, res_batch_keys=None, cls_batch_keys=None,
                    load_cls=True, base_type="A", mimo=1):
@@ -307,7 +307,7 @@ def split_base_cls(resnet_param_list,
     else:
         raise NotImplementedError
 
-    params = {"base": {}, "cls": {}}
+    params = {"base": {"params": {}, "batch_stats": {}}, "cls": {"params": {}, "batch_stats": {}}}
     cls_idx = 0
     for k in res_param_keys:
         if k in base_param_keys:
@@ -315,8 +315,9 @@ def split_base_cls(resnet_param_list,
         else:
             cls_k = cls_param_keys[cls_idx]
             if load_cls:
+                params["cls"]["params"][cls_k] = {}
                 resnet_cls = get("params", k)
-                dbn_cls = params["cls"]["params"][cls_k]
+                dbn_cls = variables["params"]["cls"][cls_k]
                 for key, value in resnet_cls.items():
                     rank = len(value.shape)
                     if dbn_cls[key].shape[0] != value.shape[0]:
@@ -590,7 +591,6 @@ def launch(config, print_fn):
         x1=jnp.empty((1, *x_dim)),
         training=False
     )
-    config.image_stats = variables["image_stats"]
 
     if config.distill:
         variables = variables.unfreeze()
@@ -639,6 +639,10 @@ def launch(config, print_fn):
         res_batch_keys = sorted(res_batch_keys, key=sorter)
         base_batch_keys = sorted(base_batch_keys, key=sorter)
         cls_batch_keys = sorted(cls_batch_keys, key=sorter)
+    else:
+        base_batch_keys = None
+        res_batch_keys = None
+        cls_batch_keys = None
         
     # ------------------------------------------------------------------------
     # define optimizers
@@ -665,6 +669,8 @@ def launch(config, print_fn):
     partition_optimizers = {
         "base": optax.set_to_zero() if not config.train_base else base_optim(),
         "score": base_optim(),
+        "cls": optax.set_to_zero(),
+        "crt": base_optim()
     }
     
     def tagging(path, v):
@@ -802,7 +808,9 @@ def launch(config, print_fn):
         swag_param_list = []
         for rng in samples_rng:
             swag_params = sample_swag(rng, swag_state)
-            swag_param_list.append(dict(params=swag_params))
+            swag_param_list.append(pdict(params=swag_params, 
+                                         batch_stats=resnet_state['model'].get('batch_stats'), 
+                                         image_stats=resnet_state['model'].get('image_stats')))        
 
         return swag_param_list
 
@@ -877,7 +885,7 @@ def launch(config, print_fn):
         rngs_dict = dict(dropout=drop_rng)
         mutable = ["batch_stats"]
         
-        swag_params = split_base_cls(sample_swag_params(state.rng, resnet_state, 1),
+        swag_params = split_base_cls(variables, sample_swag_params(state.rng, resnet_state, 1),
                 base_param_keys, res_param_keys, cls_param_keys,
                 base_batch_keys, res_batch_keys, cls_batch_keys,
                 load_cls=True, base_type="A", mimo=1)
