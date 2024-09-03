@@ -672,7 +672,7 @@ def launch(config, print_fn):
         base_type="A",
         mimo=1
     )
-    config.image_stats = variables["image_stats"]
+    # config.image_stats = variables["image_stats"]
 
     if config.distill:
         variables = variables.unfreeze()
