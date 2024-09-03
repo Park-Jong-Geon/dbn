@@ -32,7 +32,8 @@ from utils import WandbLogger, get_ens_logits, get_single_batch
 sys.path.append('./')
 np.random.seed(0)
 
-from optax_swag import swag
+from optax_swag import swag, sample_swag
+# from dbn_tidy_swag import sample_swag_params
 
 class TrainState(train_state.TrainState):
     image_stats: Any
@@ -300,10 +301,24 @@ def launch(config, print_fn):
 
         return new_state, metrics
 
+    def sample_swag_params(rng, resnet_state, num_samples):        
+        swag_state = resnet_state.opt_state[1]
+        samples_rng = jax.random.split(rng, num_samples)
+
+        swag_param_list = []
+        for rng in samples_rng:
+            swag_params = sample_swag(rng, swag_state)
+            swag_param_list.append(swag_params)
+        
+        return swag_param_list
+
     def step_val(state, batch):
-        params = state.params
+        params = sample_swag_params(rng, state, 1)[0]
+        # params = state.params
+        
         # if config.bezier:
         #     params = theta_be(params, 0.5)
+        
         params_dict = dict(params=params)
         if state.image_stats is not None:
             params_dict["image_stats"] = state.image_stats

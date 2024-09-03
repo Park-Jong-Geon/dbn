@@ -31,6 +31,7 @@ input_scaling: 3
 joint_depth: 6
 width_multi: 1
 centering: False
+rf_eps: 0.001
 
 num_target_samples: 10
 swag_ckpt_dir: checkpoints/frn_sd156800_be/checkpoint_194

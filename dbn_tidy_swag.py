@@ -463,6 +463,19 @@ def dsb_sample_cont(score, rng, x0, y0=None, config=None, dsb_stats=None, z_dsb_
     _, _, x_list = val
     return jnp.concatenate(x_list, axis=0)
 
+def sample_swag_params(rng, resnet_state, num_samples):        
+    d = resnet_state['model']['opt_state']['1']
+    swag_state = namedtuple('SWAGState', d.keys())(*d.values())
+    samples_rng = jax.random.split(rng, num_samples)
+
+    swag_param_list = []
+    for rng in samples_rng:
+        swag_params = sample_swag(rng, swag_state)
+        swag_param_list.append(pdict(params=swag_params, 
+                                     batch_stats=resnet_state['model'].get('batch_stats'),
+                                     image_stats=resnet_state['model'].get('image_stats')))        
+
+    return swag_param_list
 
 def launch(config, print_fn):
     # ------------------------------------------------------------------------
@@ -800,20 +813,6 @@ def launch(config, print_fn):
     # ------------------------------------------------------------------------
     # define step collecting features and logits
     # ------------------------------------------------------------------------
-    def sample_swag_params(rng, resnet_state, num_samples):        
-        d = resnet_state['model']['opt_state']['1']
-        swag_state = namedtuple('SWAGState', d.keys())(*d.values())
-        samples_rng = jax.random.split(rng, num_samples)
-
-        swag_param_list = []
-        for rng in samples_rng:
-            swag_params = sample_swag(rng, swag_state)
-            swag_param_list.append(pdict(params=swag_params, 
-                                         batch_stats=resnet_state['model'].get('batch_stats'), 
-                                         image_stats=resnet_state['model'].get('image_stats')))        
-
-        return swag_param_list
-
     @partial(jax.pmap, axis_name="batch")
     def step_label(state, batch):
         swag_param_list = sample_swag_params(
