@@ -38,7 +38,18 @@ import copy
 class TrainState(train_state.TrainState):
     image_stats: Any
     batch_stats: Any
-    
+
+def update_swag_batch_stats(state, params_dict, batch, batch_stats):
+    mutable = ["intermediates", "batch_stats"]
+    params_dict["batch_stats"] = batch_stats
+    _, new_state = state.apply_fn(
+        params_dict,
+        batch['images'],
+        mutable=mutable,
+        use_running_average=False,
+    )
+    return new_state['batch_stats']
+        
 def launch(config, print_fn):
     assert config.bezier == False and config.ens_dist == ""
     
@@ -372,14 +383,12 @@ def launch(config, print_fn):
         metrics = jax.lax.psum(metrics, axis_name='batch')
         return metrics
 
-    def update_swa_batch_stats(state, swag_state, batch):
+    def update_batch_stats(state, swag_state, batch):
         params_dict = dict(params=swag_state.mean)
-        mutable = ["intermediates"]
+        mutable = ["intermediates", "batch_stats"]
+        params_dict["batch_stats"] = swag_state.swa_batch_stats
         if state.image_stats is not None:
             params_dict["image_stats"] = state.image_stats
-        if state.batch_stats is not None:
-            params_dict["batch_stats"] = swag_state.swa_batch_stats
-            mutable.append("batch_stats")
                 
         _, new_model_state = state.apply_fn(
             params_dict,
@@ -405,14 +414,12 @@ def launch(config, print_fn):
                 params_dict["image_stats"] = state.image_stats
             if state.batch_stats is not None:
                 # Update batch_stats
-                swag_state = swag_state._replace(swa_batch_stats=initial_batch_stats)
                 trn_loader = dataloaders['dataloader'](rng=data_rng)
                 trn_loader = jax_utils.prefetch_to_device(trn_loader, size=2)
-                for batch_idx, batch in enumerate(trn_loader, start=1):
-                    swag_state = update_swa_batch_stats(state, swag_state, batch)
-                swag_state = swag_state._replace(
-                    swa_batch_stats=cross_replica_mean(swag_state.swa_batch_stats))
-                params_dict["batch_stats"] = swag_state.swa_batch_stats
+                batch_stats = initial_batch_stats
+                for _, batch in enumerate(trn_loader, start=1):
+                    batch_stats = update_swag_batch_stats(state, params_dict, batch, batch_stats)
+                params_dict["batch_stats"] = cross_replica_mean(batch_stats)
 
             begin = time.time()
             _, new_model_state = state.apply_fn(
@@ -552,7 +559,7 @@ def launch(config, print_fn):
             trn_loader = dataloaders['dataloader'](rng=data_rng)
             trn_loader = jax_utils.prefetch_to_device(trn_loader, size=2)
             for batch_idx, batch in enumerate(trn_loader, start=1):
-                swag_state = update_swa_batch_stats(state, swag_state, batch)
+                swag_state = update_batch_stats(state, swag_state, batch)
             
             swag_state = swag_state._replace(
                 swa_batch_stats=cross_replica_mean(swag_state.swa_batch_stats))
