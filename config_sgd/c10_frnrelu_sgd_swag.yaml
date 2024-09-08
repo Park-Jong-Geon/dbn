@@ -4,9 +4,9 @@ model_width: 2
 model_style: FRN-Swish
 model_name: FlaxResNet
 optim_bs: 256
-start_decay_epoch: 5
-start_swa_epoch: 150
-optim_ne: 200
+start_decay_epoch: 20
+start_swa_epoch: 250
+optim_ne: 300
 optim_lr: 0.1
 optim_swa_lr: 0.02
 optim_weight_decay: 0.001

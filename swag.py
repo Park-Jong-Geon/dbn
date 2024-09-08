@@ -49,16 +49,29 @@ def swa(freq: int, start_step: int) -> optax.GradientTransformation:
   def update_fn(updates: optax.Updates, state: SWAState,
                 params: optax.Params) -> Tuple[optax.Updates, SWAState]:
     
-    next_step = (state.step + 1) % freq
-    update_mask = next_step == 0
-    n = state.n + 1 * update_mask
     next_train_step = state.train_step + 1
 
-    next_params = jax.tree_util.tree_map(lambda p, u: jnp.where(update_mask, p + u, p),
-                                         params, updates)
-    next_mean = jax.tree_util.tree_map(lambda mu, np: jnp.where(update_mask, (n * mu + np) / (n + 1), mu),
-                                       state.mean, next_params)
+    @jax.jit
+    def no_swa_fn():
+      next_step = jnp.zeros([], jnp.int32)
+      n = jnp.zeros([], jnp.int32)
+      next_mean = jax.tree_util.tree_map(lambda p: jnp.zeros_like(p), params)
+      return next_step, n, next_mean
 
+    @jax.jit    
+    def swa_fn():
+      next_step = (state.step + 1) % freq
+      update_mask = next_step == 0
+      n = state.n + 1 * update_mask
+      next_params = jax.tree_util.tree_map(lambda p, u: jnp.where(update_mask, p + u, p),
+                                          params, updates)
+      next_mean = jax.tree_util.tree_map(lambda mu, np: jnp.where(update_mask, (n * mu + np) / (n + 1), mu),
+                                         state.mean, next_params)
+      return next_step, n, next_mean
+    
+    next_step, n, next_mean \
+    = jax.lax.cond(state.train_step >= start_step, swa_fn, no_swa_fn)
+    
     return updates, SWAState(step=next_step, n=n, mean=next_mean, train_step=next_train_step)
 
   return optax.GradientTransformation(init_fn, update_fn)
@@ -76,31 +89,31 @@ def swag_diag(freq: int, start_step: int) -> optax.GradientTransformation:
   def update_fn(updates: optax.Updates, state: SWAGDiagState,
                 params: optax.Params) -> Tuple[optax.Updates, SWAGDiagState]:
     
-    next_step = (state.step + 1) % freq
-    update_mask = next_step == 0
-    n = state.n + 1 * update_mask
     next_train_step = state.train_step + 1
 
-    next_params = jax.tree_util.tree_map(lambda p, u: jnp.where(update_mask, p + u, p),
-                                         params, updates)
-
     @jax.jit
-    def no_swa_fn(mean, params2, next_params):
-      next_mean = jax.tree_util.tree_map(lambda p: jnp.zeros_like(p), next_params)
-      next_params2 = next_mean
-      return next_mean, next_params2
+    def no_swa_fn():
+      next_step = jnp.zeros([], jnp.int32)
+      n = jnp.zeros([], jnp.int32)
+      next_mean = jax.tree_util.tree_map(lambda p: jnp.zeros_like(p), params)
+      next_params2 = jax.tree_util.tree_map(lambda p: jnp.zeros_like(p), params)
+      return next_step, n, next_mean, next_params2
 
     @jax.jit    
-    def swa_fn(mean, params2, next_params):
+    def swa_fn():
+      next_step = (state.step + 1) % freq
+      update_mask = next_step == 0
+      n = state.n + 1 * update_mask
+      next_params = jax.tree_util.tree_map(lambda p, u: jnp.where(update_mask, p + u, p),
+                                          params, updates)
       next_mean = jax.tree_util.tree_map(lambda mu, np: jnp.where(update_mask, (n * mu + np) / (n + 1), mu),
-                                         mean, next_params)
+                                         state.mean, next_params)
       next_params2 = jax.tree_util.tree_map(lambda p2, np: jnp.where(update_mask, (n * p2 + jnp.square(np)) / (n + 1), p2),
-                                            params2, next_params)
-      return next_mean, next_params2
+                                            state.params2, next_params)
+      return next_step, n, next_mean, next_params2
 
-    next_mean, next_params2 \
-    = jax.lax.cond(state.train_step >= start_step, swa_fn, no_swa_fn, 
-                   state.mean, state.params2, next_params)
+    next_step, n, next_mean, next_params2 \
+    = jax.lax.cond(state.train_step >= start_step, swa_fn, no_swa_fn)
 
     return updates, SWAGDiagState(step=next_step, n=n, mean=next_mean, 
                                   params2=next_params2, train_step=next_train_step)
@@ -124,36 +137,36 @@ def swag(freq: int, rank: int, start_step: int) -> optax.GradientTransformation:
   def update_fn(updates: optax.Updates, state: SWAGState,
                 params: optax.Params) -> Tuple[optax.Updates, SWAGState]:
     
-    next_step = (state.step + 1) % freq
-    update_mask = next_step == 0
-    n = state.n + 1 * update_mask
     next_train_step = state.train_step + 1
     
-    next_params = jax.tree_util.tree_map(lambda p, u: jnp.where(update_mask, p + u, p),
-                                         params, updates)
-    
     @jax.jit
-    def no_swa_fn(mean, params2, dparams, next_params):
-      next_mean = jax.tree_util.tree_map(lambda p: jnp.zeros_like(p), next_params)
-      next_params2 = next_mean
-      next_dparams = jax.tree_util.tree_map(lambda p: jnp.zeros_like(jnp.repeat(p[jnp.newaxis, ...], rank, axis=0)), next_params)
-      return next_mean, next_params2, next_dparams
+    def no_swa_fn():
+      next_step = jnp.zeros([], jnp.int32)
+      n = jnp.zeros([], jnp.int32)
+      next_mean = jax.tree_util.tree_map(lambda p: jnp.zeros_like(p), params)
+      next_params2 = jax.tree_util.tree_map(lambda p: jnp.zeros_like(p), params)
+      next_dparams = jax.tree_util.tree_map(lambda p: jnp.zeros_like(jnp.repeat(p[jnp.newaxis, ...], rank, axis=0)), params)
+      c = jnp.zeros([], jnp.int32)
+      return next_step, n, next_mean, next_params2, next_dparams, c
     
     @jax.jit  
-    def swa_fn(mean, params2, dparams, next_params):
+    def swa_fn():
+      next_step = (state.step + 1) % freq
+      update_mask = next_step == 0
+      n = state.n + 1 * update_mask
+      next_params = jax.tree_util.tree_map(lambda p, u: jnp.where(update_mask, p + u, p),
+                                          params, updates)
       next_mean = jax.tree_util.tree_map(lambda mu, np: jnp.where(update_mask, (n * mu + np) / (n + 1), mu),
-                                         mean, next_params)
+                                         state.mean, next_params)
       next_params2 = jax.tree_util.tree_map(lambda p2, np: jnp.where(update_mask, (n * p2 + jnp.square(np)) / (n + 1), p2),
-                                            params2, next_params)
+                                            state.params2, next_params)
       next_dparams = jax.tree_util.tree_map(lambda dp, np, nmu: jnp.where(update_mask, dp.at[state.c].set(np - nmu), dp),
-                                            dparams, next_params, next_mean)
-      return next_mean, next_params2, next_dparams
+                                            state.dparams, next_params, next_mean)
+      c = (state.c + 1 * update_mask) % rank
+      return next_step, n, next_mean, next_params2, next_dparams, c
     
-    next_mean, next_params2, next_dparams \
-    = jax.lax.cond(state.train_step >= start_step, swa_fn, no_swa_fn,
-                   state.mean, state.params2, state.dparams, next_params)
-
-    c = (state.c + 1 * update_mask) % rank
+    next_step, n, next_mean, next_params2, next_dparams, c \
+    = jax.lax.cond(state.train_step >= start_step, swa_fn, no_swa_fn)
 
     return updates, SWAGState(step=next_step, n=n, c=c, mean=next_mean, 
                               params2=next_params2, dparams=next_dparams, train_step=next_train_step)
