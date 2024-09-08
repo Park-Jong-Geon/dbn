@@ -14,6 +14,7 @@ class SWAState(NamedTuple):
   mean: optax.Params  # Running mean of iterates.
   step: chex.Array = jnp.zeros([], jnp.int32)  # Step count.
   n: chex.Array = jnp.zeros([], jnp.int32)  # Iterate count using for running stats.
+  train_step: chex.Array = jnp.zeros([], jnp.int32)  # Training step count.
   swa_batch_stats: chex.Array = None  # Batch stats for SWA.
 
 
@@ -23,6 +24,7 @@ class SWAGDiagState(NamedTuple):
   params2: optax.Params  # Running non-centered variance of iterates.
   step: chex.Array = jnp.zeros([], jnp.int32)  # Step count.
   n: chex.Array = jnp.zeros([], jnp.int32)  # Iterate count using for running stats.
+  train_step: chex.Array = jnp.zeros([], jnp.int32)  # Training step count.
   swa_batch_stats: chex.Array = None  # Batch stats for SWA.
 
 
@@ -33,6 +35,7 @@ class SWAGState(NamedTuple):
   dparams: optax.Params  # Low rank delta columns.
   step: chex.Array = jnp.zeros([], jnp.int32)  # Step count.
   n: chex.Array = jnp.zeros([], jnp.int32)  # Iterate count using for running stats.
+  train_step: chex.Array = jnp.zeros([], jnp.int32)  # Training step count.
   c: chex.Array = jnp.zeros([], jnp.int32)  # Current column to update.
   swa_batch_stats: chex.Array = None  # Batch stats for SWA.
   
@@ -49,19 +52,21 @@ def swa(freq: int, start_step: int) -> optax.GradientTransformation:
     next_step = (state.step + 1) % freq
     update_mask = next_step == 0
     n = state.n + 1 * update_mask
+    next_train_step = state.train_step + 1
 
     next_params = jax.tree_util.tree_map(lambda p, u: jnp.where(update_mask, p + u, p),
                                          params, updates)
     next_mean = jax.tree_util.tree_map(lambda mu, np: jnp.where(update_mask, (n * mu + np) / (n + 1), mu),
                                        state.mean, next_params)
 
-    return updates, SWAState(step=next_step, n=n, mean=next_mean)
+    return updates, SWAState(step=next_step, n=n, mean=next_mean, train_step=next_train_step)
 
   return optax.GradientTransformation(init_fn, update_fn)
 
 
 def swag_diag(freq: int, start_step: int) -> optax.GradientTransformation:
   assert freq > 0, 'freq must be positive integer.'
+  assert start_step % freq == 0, 'start_step must be divisible by freq.'
 
   def init_fn(params: optax.Params) -> SWAGDiagState:
     return SWAGDiagState(
@@ -74,13 +79,10 @@ def swag_diag(freq: int, start_step: int) -> optax.GradientTransformation:
     next_step = (state.step + 1) % freq
     update_mask = next_step == 0
     n = state.n + 1 * update_mask
+    next_train_step = state.train_step + 1
 
     next_params = jax.tree_util.tree_map(lambda p, u: jnp.where(update_mask, p + u, p),
                                          params, updates)
-    next_mean = jax.tree_util.tree_map(lambda mu, np: jnp.where(update_mask, (n * mu + np) / (n + 1), mu),
-                                       state.mean, next_params)
-    next_params2 = jax.tree_util.tree_map(lambda p2, np: jnp.where(update_mask, (n * p2 + jnp.square(np)) / (n + 1), p2),
-                                          state.params2, next_params)
 
     @jax.jit
     def no_swa_fn(mean, params2, next_params):
@@ -97,16 +99,18 @@ def swag_diag(freq: int, start_step: int) -> optax.GradientTransformation:
       return next_mean, next_params2
 
     next_mean, next_params2 \
-    = jax.lax.cond(state.step >= start_step, swa_fn, no_swa_fn, 
+    = jax.lax.cond(state.train_step >= start_step, swa_fn, no_swa_fn, 
                    state.mean, state.params2, next_params)
 
-    return updates, SWAGDiagState(step=next_step, n=n, mean=next_mean, params2=next_params2)
+    return updates, SWAGDiagState(step=next_step, n=n, mean=next_mean, 
+                                  params2=next_params2, train_step=next_train_step)
 
   return optax.GradientTransformation(init_fn, update_fn)
 
 
 def swag(freq: int, rank: int, start_step: int) -> optax.GradientTransformation:
   assert freq > 0, 'freq must be positive integer.'
+  assert start_step % freq == 0, 'start_step must be divisible by freq.'
   if rank < 2:
     logging.warning('Rank must be greater than 1. Switching to swag_diag.')
     return swag_diag(freq)
@@ -123,6 +127,7 @@ def swag(freq: int, rank: int, start_step: int) -> optax.GradientTransformation:
     next_step = (state.step + 1) % freq
     update_mask = next_step == 0
     n = state.n + 1 * update_mask
+    next_train_step = state.train_step + 1
     
     next_params = jax.tree_util.tree_map(lambda p, u: jnp.where(update_mask, p + u, p),
                                          params, updates)
@@ -145,12 +150,13 @@ def swag(freq: int, rank: int, start_step: int) -> optax.GradientTransformation:
       return next_mean, next_params2, next_dparams
     
     next_mean, next_params2, next_dparams \
-    = jax.lax.cond(state.step >= start_step, swa_fn, no_swa_fn,
+    = jax.lax.cond(state.train_step >= start_step, swa_fn, no_swa_fn,
                    state.mean, state.params2, state.dparams, next_params)
 
     c = (state.c + 1 * update_mask) % rank
 
-    return updates, SWAGState(step=next_step, n=n, c=c, mean=next_mean, params2=next_params2, dparams=next_dparams)
+    return updates, SWAGState(step=next_step, n=n, c=c, mean=next_mean, 
+                              params2=next_params2, dparams=next_dparams, train_step=next_train_step)
 
   return optax.GradientTransformation(init_fn, update_fn)
 

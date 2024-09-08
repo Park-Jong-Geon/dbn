@@ -159,6 +159,7 @@ def launch(config, print_fn):
             config.start_swa_epoch * trn_steps_per_epoch,
         ]
     )
+    
     if config.optim == "sgd":
         optimizer = optax.chain(
             optax.sgd(learning_rate=scheduler, momentum=config.optim_momentum),
