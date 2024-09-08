@@ -32,8 +32,8 @@ from utils import WandbLogger, get_ens_logits, get_single_batch
 sys.path.append('./')
 np.random.seed(0)
 
-from optax_swag import swag, sample_swag
-# from dbn_tidy_swag import sample_swag_params
+from swag import swag, sample_swag
+import copy
 
 class TrainState(train_state.TrainState):
     image_stats: Any
@@ -112,6 +112,8 @@ def launch(config, print_fn):
         return init({'params': key}, jnp.ones(dataloaders['image_shape'], model.dtype))
     _, init_rng = jax.random.split(rng)
     variables = initialize_model(init_rng, model)
+    if variables.get('batch_stats'):
+        initial_batch_stats = copy.deepcopy(variables['batch_stats'])
 
     # # define dynamic_scale
     # dynamic_scale = None
@@ -119,20 +121,42 @@ def launch(config, print_fn):
     #     dynamic_scale = dynamic_scale_lib.DynamicScale()
 
     # define optimizer with scheduler
-    scheduler = optax.warmup_cosine_decay_schedule(
-        init_value=config.warmup_factor*config.optim_lr,
-        peak_value=config.optim_lr,
-        warmup_steps=config.warmup_steps,
-        decay_steps=config.optim_ne * dataloaders['trn_steps_per_epoch'])
+    # scheduler = optax.constant_schedule(config.optim_lr)
+    # scheduler = optax.warmup_cosine_decay_schedule(
+    #     init_value=config.warmup_factor*config.optim_lr,
+    #     peak_value=config.optim_lr,
+    #     warmup_steps=config.warmup_steps,
+    #     decay_steps=config.optim_ne * dataloaders['trn_steps_per_epoch'])
+    trn_steps_per_epoch = dataloaders['trn_steps_per_epoch']
+    scheduler = optax.join_schedules(
+        schedules=[
+            optax.linear_schedule(
+                init_value       = 0.0,
+                end_value        = config.optim_lr,
+                transition_steps = config.start_decay_epoch * trn_steps_per_epoch,
+            ),
+            optax.cosine_decay_schedule(
+                init_value       = config.optim_lr,
+                decay_steps      = (config.start_swa_epoch - config.start_decay_epoch) * trn_steps_per_epoch,
+                alpha            = config.optim_swa_lr / config.optim_lr,
+            ),
+            optax.constant_schedule(
+                value            = config.optim_swa_lr,
+            ),
+        ], boundaries=[
+            config.start_decay_epoch * trn_steps_per_epoch,
+            config.start_swa_epoch * trn_steps_per_epoch,
+        ]
+    )
     if config.optim == "sgd":
         optimizer = optax.chain(
             optax.sgd(learning_rate=scheduler, momentum=config.optim_momentum),
-            swag(config.freq, config.rank)
+            swag(config.freq, config.rank, config.start_swa_epoch * trn_steps_per_epoch),
         )
     elif config.optim == "adam":
         optimizer = optax.chain(
             optax.adamw(learning_rate=scheduler, weight_decay=config.optim_weight_decay),
-            swag(config.freq, config.rank)
+            swag(config.freq, config.rank, config.start_swa_epoch * trn_steps_per_epoch),
         )
 
     # build train state
@@ -301,29 +325,21 @@ def launch(config, print_fn):
 
         return new_state, metrics
 
-    def sample_swag_params(rng, resnet_state, num_samples):        
-        swag_state = resnet_state.opt_state[1]
-        samples_rng = jax.random.split(rng, num_samples)
-
-        swag_param_list = []
-        for rng in samples_rng:
-            swag_params = sample_swag(rng, swag_state)
-            swag_param_list.append(swag_params)
-        
-        return swag_param_list
-
     def step_val(state, batch):
-        params = sample_swag_params(rng, state, 1)[0]
-        # params = state.params
-        
+        # swag_param_list, swag_batch_stats = sample_swag(1, rng, state.opt_state[1])
         # if config.bezier:
         #     params = theta_be(params, 0.5)
         
-        params_dict = dict(params=params)
+        params_dict = dict(params=state.opt_state[1].mean)
         if state.image_stats is not None:
             params_dict["image_stats"] = state.image_stats
         if state.batch_stats is not None:
-            params_dict["batch_stats"] = state.batch_stats
+            params_dict["batch_stats"] = state.opt_state[1].swa_batch_stats
+        # params_dict = dict(params=swag_param_list[0])
+        # if state.image_stats is not None:
+        #     params_dict["image_stats"] = state.image_stats
+        # if state.batch_stats is not None:
+        #     params_dict["batch_stats"] = swag_batch_stats
 
         begin = time.time()
         _, new_model_state = state.apply_fn(
@@ -344,6 +360,85 @@ def launch(config, print_fn):
             predictions, batch['labels'], log_input=True, reduction='none')          # [B,]
         nll = evaluate_nll(
             predictions, batch['labels'], log_input=True, reduction='none')          # [B,]
+
+        # refine and return metrics
+        loss = jnp.sum(jnp.where(batch['marker'], loss, jnp.zeros_like(loss)))
+        acc = jnp.sum(jnp.where(batch['marker'], acc, jnp.zeros_like(acc)))
+        nll = jnp.sum(jnp.where(batch['marker'], nll, jnp.zeros_like(nll)))
+        cnt = jnp.sum(batch['marker'])
+
+        metrics = OrderedDict(
+            {"loss": loss, 'acc': acc, 'nll': nll, 'cnt': cnt, "sec": sec*cnt})
+        metrics = jax.lax.psum(metrics, axis_name='batch')
+        return metrics
+
+    def update_swa_batch_stats(state, swag_state, batch):
+        params_dict = dict(params=swag_state.mean)
+        mutable = ["intermediates"]
+        if state.image_stats is not None:
+            params_dict["image_stats"] = state.image_stats
+        if state.batch_stats is not None:
+            params_dict["batch_stats"] = swag_state.swa_batch_stats
+            mutable.append("batch_stats")
+                
+        _, new_model_state = state.apply_fn(
+            params_dict,
+            batch['images'],
+            mutable=mutable,
+            use_running_average=False,
+        )
+        return swag_state._replace(
+            swa_batch_stats = new_model_state['batch_stats'],
+        )
+    
+    def step_ens_val(state, batch):
+        swag_state = state.opt_state[1]
+        swag_param_list = sample_swag(config.num_swag_samples, rng, swag_state)
+        # if config.bezier:
+        #     params = theta_be(params, 0.5)
+        
+        logit_list = []
+        sec = 0
+        for swag_param in swag_param_list:
+            params_dict = dict(params=swag_param)
+            if state.image_stats is not None:
+                params_dict["image_stats"] = state.image_stats
+            if state.batch_stats is not None:
+                # Update batch_stats
+                swag_state = swag_state._replace(swa_batch_stats=initial_batch_stats)
+                trn_loader = dataloaders['dataloader'](rng=data_rng)
+                trn_loader = jax_utils.prefetch_to_device(trn_loader, size=2)
+                for batch_idx, batch in enumerate(trn_loader, start=1):
+                    swag_state = update_swa_batch_stats(state, swag_state, batch)
+                swag_state = swag_state._replace(
+                    swa_batch_stats=cross_replica_mean(swag_state.swa_batch_stats))
+                params_dict["batch_stats"] = swag_state.swa_batch_stats
+
+            begin = time.time()
+            _, new_model_state = state.apply_fn(
+                params_dict, batch['images'],
+                rngs=None,
+                mutable='intermediates',
+                use_running_average=True)
+            sec_ = time.time() - begin
+            
+            logits = new_model_state['intermediates']['cls.logit'][0]
+            logit_list.append(logits)
+            
+            sec += sec_
+        
+        # compute metrics
+        _logits = jnp.stack(logit_list)
+        logprobs = jax.nn.log_softmax(_logits, axis=-1)
+        ens_logprobs = jax.scipy.special.logsumexp(logprobs, axis=0) - np.log(logprobs.shape[0])
+        
+        target = common_utils.onehot(
+            batch['labels'], num_classes=logits.shape[-1])  # [B, K,]
+        loss = -jnp.sum(target * ens_logprobs, axis=-1)      # [B,]
+        acc = evaluate_acc(
+            ens_logprobs, batch['labels'], log_input=True, reduction='none')          # [B,]
+        nll = evaluate_nll(
+            ens_logprobs, batch['labels'], log_input=True, reduction='none')          # [B,]
 
         # refine and return metrics
         loss = jnp.sum(jnp.where(batch['marker'], loss, jnp.zeros_like(loss)))
@@ -384,11 +479,13 @@ def launch(config, print_fn):
         f()
         sec = time.time() - begin
         return OrderedDict({"sec": sec})
-
+    
     cross_replica_mean = jax.pmap(lambda x: jax.lax.pmean(x, 'x'), 'x')
     p_step_trn = jax.pmap(partial(step_trn, config=config,
                           scheduler=scheduler), axis_name='batch')
     p_step_val = jax.pmap(step_val,
+                          axis_name='batch')
+    p_step_ens_val = jax.pmap(step_ens_val,
                           axis_name='batch')
     state = jax_utils.replicate(state)
     if config.bezier:
@@ -448,15 +545,31 @@ def launch(config, print_fn):
             state = state.replace(
                 batch_stats=cross_replica_mean(state.batch_stats))
 
+            opt_state = state.opt_state[0]
+            swag_state = state.opt_state[1]
+            swag_state = swag_state._replace(swa_batch_stats=initial_batch_stats)
+            
+            trn_loader = dataloaders['dataloader'](rng=data_rng)
+            trn_loader = jax_utils.prefetch_to_device(trn_loader, size=2)
+            for batch_idx, batch in enumerate(trn_loader, start=1):
+                swag_state = update_swa_batch_stats(state, swag_state, batch)
+            
+            swag_state = swag_state._replace(
+                swa_batch_stats=cross_replica_mean(swag_state.swa_batch_stats))
+            state = state.replace(opt_state=(opt_state, swag_state))
+
         # ---------------------------------------------------------------------- #
         # Valid
         # ---------------------------------------------------------------------- #
         val_metric = []
+        val_ens_metric = []
         val_loader = dataloaders['val_loader'](rng=None)
         val_loader = jax_utils.prefetch_to_device(val_loader, size=2)
         for batch_idx, batch in enumerate(val_loader, start=1):
             metrics = p_step_val(state, batch)
+            ens_metrics = p_step_ens_val(state, batch)
             val_metric.append(metrics)
+            val_ens_metric.append(ens_metrics)
         val_metric = common_utils.get_metrics(val_metric)
         val_summarized = {f'val/{k}': v for k,
                           v in jax.tree_util.tree_map(lambda e: e.sum(), val_metric).items()}
@@ -467,21 +580,35 @@ def launch(config, print_fn):
         del val_summarized['val/cnt']
         val_summarized.update(trn_summarized)
         wl.log(val_summarized)
+        
+        val_ens_metric = common_utils.get_metrics(val_ens_metric)
+        val_ens_summarized = {f'val_ens/{k}': v for k,
+                          v in jax.tree_util.tree_map(lambda e: e.sum(), val_ens_metric).items()}
+        val_ens_summarized['val_ens/loss'] /= val_ens_summarized['val_ens/cnt']
+        val_ens_summarized['val_ens/acc'] /= val_ens_summarized['val_ens/cnt']
+        val_ens_summarized['val_ens/nll'] /= val_ens_summarized['val_ens/cnt']
+        val_ens_summarized['val_ens/sec'] /= val_ens_summarized['val_ens/cnt']
+        del val_ens_summarized['val_ens/cnt']
+        val_ens_summarized.update(trn_summarized)
+        wl.log(val_ens_summarized)
 
         # ---------------------------------------------------------------------- #
         # Save
         # ---------------------------------------------------------------------- #
         tst_metric = []
+        tst_ens_metric = []
         tst_loader = dataloaders['tst_loader'](rng=None)
         tst_loader = jax_utils.prefetch_to_device(tst_loader, size=2)
         for batch_idx, batch in enumerate(tst_loader, start=1):
             metrics = p_step_val(state, batch)
+            ens_metrics = p_step_ens_val(state, batch)
             # if best_acc == 0 and batch_idx == 1:
             #     sbatch = get_single_batch(batch)
             #     sstate = jax_utils.unreplicate(state)
             #     wallclock_metrics = measure_wallclock(sstate, sbatch)
             #     print("wall clock time", wallclock_metrics["sec"], "sec")
             tst_metric.append(metrics)
+            tst_ens_metric.append(ens_metrics)
         tst_metric = common_utils.get_metrics(tst_metric)
         tst_summarized = {
             f'tst/{k}': v for k, v in jax.tree_util.tree_map(lambda e: e.sum(), tst_metric).items()}
@@ -491,6 +618,17 @@ def launch(config, print_fn):
         tst_summarized['tst/sec'] /= tst_summarized['tst/cnt']
         del tst_summarized["tst/cnt"]
         wl.log(tst_summarized)
+        
+        tst_ens_metric = common_utils.get_metrics(tst_ens_metric)
+        tst_ens_summarized = {
+            f'tst_ens/{k}': v for k, v in jax.tree_util.tree_map(lambda e: e.sum(), tst_ens_metric).items()}
+        tst_ens_summarized['tst_ens/loss'] /= tst_ens_summarized['tst_ens/cnt']
+        tst_ens_summarized['tst_ens/acc'] /= tst_ens_summarized['tst_ens/cnt']
+        tst_ens_summarized['tst_ens/nll'] /= tst_ens_summarized['tst_ens/cnt']
+        tst_ens_summarized['tst_ens/sec'] /= tst_ens_summarized['tst_ens/cnt']
+        del tst_ens_summarized["tst_ens/cnt"]
+        wl.log(tst_ens_summarized)
+        
         best_acc = val_summarized["val/acc"]
         # if config.bezier:
         #     best_acc = val_summarized["val/loss"]
