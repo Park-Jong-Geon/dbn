@@ -420,7 +420,7 @@ def build_dbn(config):
     return dbn, (dsb_stats, None)
 
 
-def dsb_sample(score, rng, x0, y0, config=None, dsb_stats=None, z_dsb_stats=None, steps=None):
+def dsb_sample(score, rng, x0, y0=None, config=None, dsb_stats=None, z_dsb_stats=None, steps=None):
     shape = x0.shape
     batch_size = shape[0]
     _sigma_t = dsb_stats["sigma_t"]
