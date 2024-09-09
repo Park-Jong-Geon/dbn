@@ -24,7 +24,7 @@ cls_from_scratch: False
 mixup_alpha: 0.4
 forget: 6
 linear_noise: True
-start_temp: 1
+start_temp: 5
 ensemble_prediction: 3
 dsc: True
 input_scaling: 3
@@ -33,4 +33,4 @@ width_multi: 1
 centering: False
 
 num_target_samples: 10
-swag_ckpt_dir: checkpoints/swag_freq1_rank200/checkpoint_198
+swag_ckpt_dir: checkpoints/sgd_swag/checkpoint_300

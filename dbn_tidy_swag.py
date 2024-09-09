@@ -47,8 +47,10 @@ import defaults_sgd
 from einops import rearrange
 from flax import traverse_util
 
-from optax_swag import sample_swag
+from swag import sample_swag
+from sgd_swag import update_swag_batch_stats
 from collections import namedtuple
+import copy
 
 class TrainState(train_state.TrainState):
     batch_stats: Any
@@ -285,6 +287,46 @@ def get_score_input_dim(config):
     return score_input_dim
 
 
+def get_keys(variables, resnet_params):
+    def sorter(x):
+        assert "_" in x
+        name, num = x.split("_")
+        return (name, int(num))
+
+    base_param_keys = []
+    res_param_keys = []
+    cls_param_keys = []
+    for k, v in resnet_params["params"].items():
+        res_param_keys.append(k)
+    for k, v in variables["params"]["base"].items():
+        base_param_keys.append(k)
+    for k, v in variables["params"]["cls"].items():
+        cls_param_keys.append(k)
+    res_param_keys = sorted(res_param_keys, key=sorter)
+    base_param_keys = sorted(base_param_keys, key=sorter)
+    cls_param_keys = sorted(cls_param_keys, key=sorter)
+
+    if resnet_params.get("batch_stats"):
+        base_batch_keys = []
+        res_batch_keys = []
+        cls_batch_keys = []
+        for k, v in resnet_params["batch_stats"].items():
+            res_batch_keys.append(k)
+        for k, v in variables["batch_stats"]["base"].items():
+            base_batch_keys.append(k)
+        for k, v in variables["batch_stats"]["cls"].items():
+            cls_batch_keys.append(k)
+        res_batch_keys = sorted(res_batch_keys, key=sorter)
+        base_batch_keys = sorted(base_batch_keys, key=sorter)
+        cls_batch_keys = sorted(cls_batch_keys, key=sorter)
+    else:
+        base_batch_keys = None
+        res_batch_keys = None
+        cls_batch_keys = None
+    
+    return [base_param_keys, res_param_keys, cls_param_keys, base_batch_keys, res_batch_keys, cls_batch_keys]
+
+
 def split_base_cls(variables, resnet_param_list,
                    base_param_keys, res_param_keys, cls_param_keys,
                    base_batch_keys=None, res_batch_keys=None, cls_batch_keys=None,
@@ -349,7 +391,6 @@ def split_base_cls(variables, resnet_param_list,
                 cls_idx += 1
 
     return params
-
 
 def build_dbn(config):
     cls_net = get_classifier(config)
@@ -463,19 +504,6 @@ def dsb_sample_cont(score, rng, x0, y0=None, config=None, dsb_stats=None, z_dsb_
     _, _, x_list = val
     return jnp.concatenate(x_list, axis=0)
 
-def sample_swag_params(rng, resnet_state, num_samples):     
-    d = resnet_state['model']['opt_state']['1']
-    swag_state = namedtuple('SWAGState', d.keys())(*d.values())
-    samples_rng = jax.random.split(rng, num_samples)
-
-    swag_param_list = []
-    for rng in samples_rng:
-        swag_params = sample_swag(rng, swag_state)
-        swag_param_list.append(pdict(params=swag_params, 
-                                     batch_stats=resnet_state['model'].get('batch_stats'),
-                                     image_stats=resnet_state['model'].get('image_stats')))        
-
-    return swag_param_list
 
 def launch(config, print_fn):
     # ------------------------------------------------------------------------
@@ -539,6 +567,8 @@ def launch(config, print_fn):
     resnet_state, params, batch_stats, image_stats = load_resnet(config.swag_ckpt_dir)
     resnet_params = pdict(
         params=params, batch_stats=batch_stats, image_stats=image_stats)
+    d = resnet_state['model']['opt_state']['1']
+    swag_state = namedtuple('SWAGState', d.keys())(*d.values())
 
     # ------------------------------------------------------------------------
     # determine dims of base/score/cls
@@ -604,6 +634,8 @@ def launch(config, print_fn):
         x1=jnp.empty((1, *x_dim)),
         training=False
     )
+    if variables.get('batch_stats'):
+        initial_batch_stats = copy.deepcopy(variables['batch_stats'])
 
     if config.distill:
         variables = variables.unfreeze()
@@ -617,45 +649,6 @@ def launch(config, print_fn):
         if variables.get("batch_stats") is not None:
             variables["batch_stats"] = saved_batch_stats
         variables = freeze(variables)
-        
-    # ------------------------------------------------------------------------
-    # Store keys of resnet, base, cls for later usage
-    # ------------------------------------------------------------------------
-    def sorter(x):
-        assert "_" in x
-        name, num = x.split("_")
-        return (name, int(num))
-    
-    base_param_keys = []
-    res_param_keys = []
-    cls_param_keys = []
-    for k, v in resnet_params["params"].items():
-        res_param_keys.append(k)
-    for k, v in variables["params"]["base"].items():
-        base_param_keys.append(k)
-    for k, v in variables["params"]["cls"].items():
-        cls_param_keys.append(k)
-    res_param_keys = sorted(res_param_keys, key=sorter)
-    base_param_keys = sorted(base_param_keys, key=sorter)
-    cls_param_keys = sorted(cls_param_keys, key=sorter)
-
-    if resnet_params.get("batch_stats"):
-        base_batch_keys = []
-        res_batch_keys = []
-        cls_batch_keys = []
-        for k, v in resnet_params["batch_stats"].items():
-            res_batch_keys.append(k)
-        for k, v in variables["batch_stats"]["base"].items():
-            base_batch_keys.append(k)
-        for k, v in variables["batch_stats"]["cls"].items():
-            cls_batch_keys.append(k)
-        res_batch_keys = sorted(res_batch_keys, key=sorter)
-        base_batch_keys = sorted(base_batch_keys, key=sorter)
-        cls_batch_keys = sorted(cls_batch_keys, key=sorter)
-    else:
-        base_batch_keys = None
-        res_batch_keys = None
-        cls_batch_keys = None
         
     # ------------------------------------------------------------------------
     # define optimizers
@@ -812,16 +805,26 @@ def launch(config, print_fn):
 
     # ------------------------------------------------------------------------
     # define step collecting features and logits
-    # ------------------------------------------------------------------------
+    # ------------------------------------------------------------------------    
     @partial(jax.pmap, axis_name="batch")
     def step_label(state, batch):
-        swag_param_list = sample_swag_params(
-            state.rng, resnet_state, config.num_target_samples)
+        swag_param_list = sample_swag(config.num_target_samples, state.rng, swag_state)
         
         z0_list = []
         logitsA = []
-        
-        for res_params_dict in swag_param_list:
+        for swag_param in swag_param_list:
+            res_params_dict = dict(params=swag_param)
+            if image_stats is not None:
+                res_params_dict["image_stats"] = image_stats
+            if batch_stats is not None:
+                # Update batch_stats
+                trn_loader = dataloaders['dataloader'](rng=state.rng)
+                trn_loader = jax_utils.prefetch_to_device(trn_loader, size=2)
+                iter_batch_stats = initial_batch_stats
+                for _, batch in enumerate(trn_loader, start=1):
+                    iter_batch_stats = update_swag_batch_stats(resnet, res_params_dict, batch, iter_batch_stats)
+                res_params_dict["batch_stats"] = cross_replica_mean(iter_batch_stats)
+            
             images = batch["images"]
             z0, logits0 = forward_resnet(res_params_dict, images)
             z0_list.append(z0)
@@ -861,7 +864,8 @@ def launch(config, print_fn):
                 z_dsb_stats=None,
                 steps=teacher_steps)
             logitsC, _ = model_bd.sample(
-                score_rng, _dsb_sample, batch["images"])
+                score_rng, _dsb_sample, batch["images"],
+                base_params=swag_param_list[0]["base"], cls_params=swag_param_list[0]["base"])
             logitsC = rearrange(
                 logitsC, "n (t b) z -> t b (n z)", t=teacher_steps+1)
             batch["logitsC"] = logitsC[-1]
@@ -884,15 +888,28 @@ def launch(config, print_fn):
         rngs_dict = dict(dropout=drop_rng)
         mutable = ["batch_stats"]
         
-        swag_params = split_base_cls(variables, sample_swag_params(state.rng, resnet_state, 1),
-                base_param_keys, res_param_keys, cls_param_keys,
-                base_batch_keys, res_batch_keys, cls_batch_keys,
-                load_cls=True, base_type="A", mimo=1)
+        key_list = get_keys(variables, resnet_params)
+        
+        swag_param = sample_swag(1, state.rng, swag_state)[0]
+        res_params_dict = dict(params=swag_param)
+        if image_stats is not None:
+            res_params_dict["image_stats"] = image_stats
+        if batch_stats is not None:
+            # Update batch_stats
+            trn_loader = dataloaders['dataloader'](rng=state.rng)
+            trn_loader = jax_utils.prefetch_to_device(trn_loader, size=2)
+            iter_batch_stats = initial_batch_stats
+            for _, batch in enumerate(trn_loader, start=1):
+                iter_batch_stats = update_swag_batch_stats(resnet, res_params_dict, batch, iter_batch_stats)
+            res_params_dict["batch_stats"] = cross_replica_mean(iter_batch_stats)
+                
+        splitted_swag_param = split_base_cls(variables, [res_params_dict], 
+                                     *key_list, load_cls=True, base_type="A", mimo=1)
         
         output = state.apply_fn(
             params_dict, score_rng,
             _logitsA, batch["images"],
-            swag_params["base"], swag_params["cls"],
+            base_params=splitted_swag_param["base"], cls_params=splitted_swag_param["cls"],
             training=train,
             rngs=rngs_dict,
             **(dict(mutable=mutable) if train else dict()),
@@ -997,6 +1014,24 @@ def launch(config, print_fn):
         return acc_list, nll_list, cum_acc_list, cum_nll_list
 
     def sample_func(state, batch, steps=(config.T+1)//2):
+        key_list = get_keys(variables, resnet_params)
+
+        swag_param = sample_swag(1, state.rng, swag_state)[0]
+        res_params_dict = dict(params=swag_param)
+        if image_stats is not None:
+            res_params_dict["image_stats"] = image_stats
+        if batch_stats is not None:
+            # Update batch_stats
+            trn_loader = dataloaders['dataloader'](rng=state.rng)
+            trn_loader = jax_utils.prefetch_to_device(trn_loader, size=2)
+            iter_batch_stats = initial_batch_stats
+            for _, batch in enumerate(trn_loader, start=1):
+                iter_batch_stats = update_swag_batch_stats(resnet, res_params_dict, batch, iter_batch_stats)
+            res_params_dict["batch_stats"] = cross_replica_mean(iter_batch_stats)
+
+        splitted_swag_param = split_base_cls(variables, [res_params_dict],
+                                     *key_list, load_cls=True, base_type="A", mimo=1)
+        
         labels = batch["labels"]
         drop_rng, score_rng = jax.random.split(state.rng)
 
@@ -1010,7 +1045,8 @@ def launch(config, print_fn):
             dsb_sample,
             config=config, dsb_stats=dsb_stats, z_dsb_stats=z_dsb_stats, steps=steps)
         logitsC, _zC = model_bd.sample(
-            score_rng, _dsb_sample, batch["images"])
+            score_rng, _dsb_sample, batch["images"], 
+            base_params=splitted_swag_param["base"], cls_params=splitted_swag_param["cls"])
         logitsC = rearrange(logitsC, "n (t b) z -> t n b z", t=steps+1)
         logitsB = logitsC[0][0]
         logitsC = logitsC[-1][0]

@@ -3506,9 +3506,9 @@ class DiffusionBridgeNetwork(nn.Module):
     def sample(self, *args, **kwargs):
         return self.conditional_sample(*args, **kwargs)
 
-    def conditional_sample(self, rng, sampler, x):
-        zB = self.encode(x, training=False)
-        lB = self.classify(zB, training=False)
+    def conditional_sample(self, rng, sampler, x, base_params=None, cls_params=None):
+        zB = self.encode(x, base_params, training=False)
+        lB = self.classify(zB, cls_params, training=False)
         # _lB = lB
         # _lB = self.set_logit(rng, _lB, training=False)
         # lC = sampler(
