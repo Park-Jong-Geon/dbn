@@ -649,6 +649,8 @@ def launch(config, print_fn):
         if variables.get("batch_stats") is not None:
             variables["batch_stats"] = saved_batch_stats
         variables = freeze(variables)
+
+    key_list = get_keys(variables, resnet_params)
         
     # ------------------------------------------------------------------------
     # define optimizers
@@ -888,8 +890,6 @@ def launch(config, print_fn):
         rngs_dict = dict(dropout=drop_rng)
         mutable = ["batch_stats"]
         
-        key_list = get_keys(variables, resnet_params)
-        
         swag_param = sample_swag(1, state.rng, swag_state)[0]
         res_params_dict = dict(params=swag_param)
         if image_stats is not None:
@@ -1014,8 +1014,6 @@ def launch(config, print_fn):
         return acc_list, nll_list, cum_acc_list, cum_nll_list
 
     def sample_func(state, batch, steps=(config.T+1)//2):
-        key_list = get_keys(variables, resnet_params)
-
         swag_param = sample_swag(1, state.rng, swag_state)[0]
         res_params_dict = dict(params=swag_param)
         if image_stats is not None:
