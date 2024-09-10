@@ -49,6 +49,7 @@ from flax import traverse_util
 
 from swag import sample_swag
 from sgd_swag import update_swag_batch_stats
+from dbn_tidy import load_base_cls
 from collections import namedtuple
 import copy
 
@@ -287,110 +288,110 @@ def get_score_input_dim(config):
     return score_input_dim
 
 
-def get_keys(variables, resnet_params):
-    def sorter(x):
-        assert "_" in x
-        name, num = x.split("_")
-        return (name, int(num))
+# def get_keys(variables, resnet_params):
+#     def sorter(x):
+#         assert "_" in x
+#         name, num = x.split("_")
+#         return (name, int(num))
 
-    base_param_keys = []
-    res_param_keys = []
-    cls_param_keys = []
-    for k, v in resnet_params["params"].items():
-        res_param_keys.append(k)
-    for k, v in variables["params"]["base"].items():
-        base_param_keys.append(k)
-    for k, v in variables["params"]["cls"].items():
-        cls_param_keys.append(k)
-    res_param_keys = sorted(res_param_keys, key=sorter)
-    base_param_keys = sorted(base_param_keys, key=sorter)
-    cls_param_keys = sorted(cls_param_keys, key=sorter)
+#     base_param_keys = []
+#     res_param_keys = []
+#     cls_param_keys = []
+#     for k, v in resnet_params["params"].items():
+#         res_param_keys.append(k)
+#     for k, v in variables["params"]["base"].items():
+#         base_param_keys.append(k)
+#     for k, v in variables["params"]["cls"].items():
+#         cls_param_keys.append(k)
+#     res_param_keys = sorted(res_param_keys, key=sorter)
+#     base_param_keys = sorted(base_param_keys, key=sorter)
+#     cls_param_keys = sorted(cls_param_keys, key=sorter)
 
-    if resnet_params.get("batch_stats"):
-        base_batch_keys = []
-        res_batch_keys = []
-        cls_batch_keys = []
-        for k, v in resnet_params["batch_stats"].items():
-            res_batch_keys.append(k)
-        for k, v in variables["batch_stats"]["base"].items():
-            base_batch_keys.append(k)
-        for k, v in variables["batch_stats"]["cls"].items():
-            cls_batch_keys.append(k)
-        res_batch_keys = sorted(res_batch_keys, key=sorter)
-        base_batch_keys = sorted(base_batch_keys, key=sorter)
-        cls_batch_keys = sorted(cls_batch_keys, key=sorter)
-    else:
-        base_batch_keys = None
-        res_batch_keys = None
-        cls_batch_keys = None
+#     if resnet_params.get("batch_stats"):
+#         base_batch_keys = []
+#         res_batch_keys = []
+#         cls_batch_keys = []
+#         for k, v in resnet_params["batch_stats"].items():
+#             res_batch_keys.append(k)
+#         for k, v in variables["batch_stats"]["base"].items():
+#             base_batch_keys.append(k)
+#         for k, v in variables["batch_stats"]["cls"].items():
+#             cls_batch_keys.append(k)
+#         res_batch_keys = sorted(res_batch_keys, key=sorter)
+#         base_batch_keys = sorted(base_batch_keys, key=sorter)
+#         cls_batch_keys = sorted(cls_batch_keys, key=sorter)
+#     else:
+#         base_batch_keys = None
+#         res_batch_keys = None
+#         cls_batch_keys = None
     
-    return [base_param_keys, res_param_keys, cls_param_keys, base_batch_keys, res_batch_keys, cls_batch_keys]
+#     return [base_param_keys, res_param_keys, cls_param_keys, base_batch_keys, res_batch_keys, cls_batch_keys]
 
 
-def split_base_cls(variables, resnet_param_list,
-                   base_param_keys, res_param_keys, cls_param_keys,
-                   base_batch_keys=None, res_batch_keys=None, cls_batch_keys=None,
-                   load_cls=True, base_type="A", mimo=1):
-    if not isinstance(base_type, str):
-        def get(key1, key2):
-            return resnet_param_list[base_type][key1][key2]
-    elif base_type == "A":
-        def get(key1, key2, idx=0):
-            return resnet_param_list[idx][key1][key2]
-    elif base_type == "AVG":
-        def get(key1, key2):
-            return jax.tree_util.tree_map(
-                lambda *args: sum(args)/len(args),
-                *[param[key1][key2] for param in resnet_param_list])
-    elif base_type == "BE":
-        be_params = resnet_param_list[0]
-        def get(key1, key2):
-            return be_params[key1][key2]
-    else:
-        raise NotImplementedError
+# def split_base_cls(variables, resnet_param_list,
+#                    base_param_keys, res_param_keys, cls_param_keys,
+#                    base_batch_keys=None, res_batch_keys=None, cls_batch_keys=None,
+#                    load_cls=True, base_type="A", mimo=1):
+#     if not isinstance(base_type, str):
+#         def get(key1, key2):
+#             return resnet_param_list[base_type][key1][key2]
+#     elif base_type == "A":
+#         def get(key1, key2, idx=0):
+#             return resnet_param_list[idx][key1][key2]
+#     elif base_type == "AVG":
+#         def get(key1, key2):
+#             return jax.tree_util.tree_map(
+#                 lambda *args: sum(args)/len(args),
+#                 *[param[key1][key2] for param in resnet_param_list])
+#     elif base_type == "BE":
+#         be_params = resnet_param_list[0]
+#         def get(key1, key2):
+#             return be_params[key1][key2]
+#     else:
+#         raise NotImplementedError
 
-    params = {"base": {"params": {}, "batch_stats": {}}, "cls": {"params": {}, "batch_stats": {}}}
-    cls_idx = 0
-    for k in res_param_keys:
-        if k in base_param_keys:
-            params["base"]["params"][k] = get("params", k)
-        else:
-            cls_k = cls_param_keys[cls_idx]
-            if load_cls:
-                params["cls"]["params"][cls_k] = {}
-                resnet_cls = get("params", k)
-                dbn_cls = variables["params"]["cls"][cls_k]
-                for key, value in resnet_cls.items():
-                    rank = len(value.shape)
-                    if dbn_cls[key].shape[0] != value.shape[0]:
-                        params["cls"]["params"][cls_k][key] = jnp.tile(
-                            value, reps=[mimo]+[1]*(rank-1))
-                    elif rank > 1 and dbn_cls[key].shape[1] != value.shape[1]:
-                        params["cls"]["params"][cls_k][key] = jnp.tile(
-                            value, reps=[1]+[mimo]+[1]*(rank-2))
-                    elif rank > 2 and dbn_cls[key].shape[2] != value.shape[2]:
-                        params["cls"]["params"][cls_k][key] = jnp.tile(
-                            value, reps=[1, 1]+[mimo]+[1]*(rank-3))
-                    elif rank > 3 and dbn_cls[key].shape[3] != value.shape[3]:
-                        params["cls"]["params"][cls_k][key] = jnp.tile(
-                            value, reps=[1, 1, 1]+[mimo]+[1]*(rank-4))
-                    else:
-                        params["cls"]["params"][cls_k][key] = value
-            cls_idx += 1
+#     params = {"base": {"params": {}, "batch_stats": {}}, "cls": {"params": {}, "batch_stats": {}}}
+#     cls_idx = 0
+#     for k in res_param_keys:
+#         if k in base_param_keys:
+#             params["base"]["params"][k] = get("params", k)
+#         else:
+#             cls_k = cls_param_keys[cls_idx]
+#             if load_cls:
+#                 params["cls"]["params"][cls_k] = {}
+#                 resnet_cls = get("params", k)
+#                 dbn_cls = variables["params"]["cls"][cls_k]
+#                 for key, value in resnet_cls.items():
+#                     rank = len(value.shape)
+#                     if dbn_cls[key].shape[0] != value.shape[0]:
+#                         params["cls"]["params"][cls_k][key] = jnp.tile(
+#                             value, reps=[mimo]+[1]*(rank-1))
+#                     elif rank > 1 and dbn_cls[key].shape[1] != value.shape[1]:
+#                         params["cls"]["params"][cls_k][key] = jnp.tile(
+#                             value, reps=[1]+[mimo]+[1]*(rank-2))
+#                     elif rank > 2 and dbn_cls[key].shape[2] != value.shape[2]:
+#                         params["cls"]["params"][cls_k][key] = jnp.tile(
+#                             value, reps=[1, 1]+[mimo]+[1]*(rank-3))
+#                     elif rank > 3 and dbn_cls[key].shape[3] != value.shape[3]:
+#                         params["cls"]["params"][cls_k][key] = jnp.tile(
+#                             value, reps=[1, 1, 1]+[mimo]+[1]*(rank-4))
+#                     else:
+#                         params["cls"]["params"][cls_k][key] = value
+#             cls_idx += 1
 
-    if res_batch_keys is not None:
-        cls_idx = 0
-        for k in res_batch_keys:
-            if k in base_batch_keys:
-                params["base"]["batch_stats"][k] = get("batch_stats", k)
-            else:
-                cls_k = cls_batch_keys[cls_idx]
-                if load_cls:
-                    params["cls"]["batch_stats"][cls_k] = get(
-                        "batch_stats", k)
-                cls_idx += 1
+#     if res_batch_keys is not None:
+#         cls_idx = 0
+#         for k in res_batch_keys:
+#             if k in base_batch_keys:
+#                 params["base"]["batch_stats"][k] = get("batch_stats", k)
+#             else:
+#                 cls_k = cls_batch_keys[cls_idx]
+#                 if load_cls:
+#                     params["cls"]["batch_stats"][cls_k] = get(
+#                         "batch_stats", k)
+#                 cls_idx += 1
 
-    return params
+#     return params
 
 def build_dbn(config):
     cls_net = get_classifier(config)
@@ -650,7 +651,7 @@ def launch(config, print_fn):
             variables["batch_stats"] = saved_batch_stats
         variables = freeze(variables)
 
-    key_list = get_keys(variables, resnet_params)
+    # key_list = get_keys(variables, resnet_params)
         
     # ------------------------------------------------------------------------
     # define optimizers
@@ -889,27 +890,11 @@ def launch(config, print_fn):
             batch_stats=state.batch_stats)
         rngs_dict = dict(dropout=drop_rng)
         mutable = ["batch_stats"]
-        
-        swag_param = sample_swag(1, state.rng, swag_state)[0]
-        res_params_dict = dict(params=swag_param)
-        if image_stats is not None:
-            res_params_dict["image_stats"] = image_stats
-        if batch_stats is not None:
-            # Update batch_stats
-            trn_loader = dataloaders['dataloader'](rng=state.rng)
-            trn_loader = jax_utils.prefetch_to_device(trn_loader, size=2)
-            iter_batch_stats = initial_batch_stats
-            for _, batch in enumerate(trn_loader, start=1):
-                iter_batch_stats = update_swag_batch_stats(resnet, res_params_dict, batch, iter_batch_stats)
-            res_params_dict["batch_stats"] = cross_replica_mean(iter_batch_stats)
-                
-        splitted_swag_param = split_base_cls(variables, [res_params_dict], 
-                                     *key_list, load_cls=True, base_type="A", mimo=1)
-        
+
         output = state.apply_fn(
             params_dict, score_rng,
             _logitsA, batch["images"],
-            base_params=splitted_swag_param["base"], cls_params=splitted_swag_param["cls"],
+            # base_params=splitted_swag_param["base"], cls_params=splitted_swag_param["cls"],
             training=train,
             rngs=rngs_dict,
             **(dict(mutable=mutable) if train else dict()),
@@ -943,12 +928,32 @@ def launch(config, print_fn):
     def get_loss_func():
         return loss_func
 
+
     @ partial(jax.pmap, axis_name="batch")
     def step_train(state, batch):
-
         def loss_fn(params):
             _loss_func = get_loss_func()
             return _loss_func(params, state, batch)
+
+        swag_param = sample_swag(1, state.rng, swag_state)[0]
+        res_params_dict = dict(params=swag_param)
+        if image_stats is not None:
+            res_params_dict["image_stats"] = image_stats
+        if batch_stats is not None:
+            # Update batch_stats
+            trn_loader = dataloaders['dataloader'](rng=state.rng)
+            trn_loader = jax_utils.prefetch_to_device(trn_loader, size=2)
+            iter_batch_stats = initial_batch_stats
+            for _, batch in enumerate(trn_loader, start=1):
+                iter_batch_stats = update_swag_batch_stats(resnet, res_params_dict, batch, iter_batch_stats)
+            res_params_dict["batch_stats"] = cross_replica_mean(iter_batch_stats)
+        
+        new_variables = load_base_cls(variables, [res_params_dict], load_cls=True, base_type="A", mimo=1)
+        state = state.replace(params=freeze(dict(base=new_variables["params"]["base"], 
+                                              cls=new_variables["params"]["cls"], 
+                                              score=state.params["score"])),)
+        assert new_variables["batch_stats"].get("base") is None
+        assert new_variables["batch_stats"].get("cls") is None
 
         (loss, (metrics, new_model_state)), grads = jax.value_and_grad(
             loss_fn, has_aux=True)(state.params)
@@ -1027,8 +1032,14 @@ def launch(config, print_fn):
                 iter_batch_stats = update_swag_batch_stats(resnet, res_params_dict, batch, iter_batch_stats)
             res_params_dict["batch_stats"] = cross_replica_mean(iter_batch_stats)
 
-        splitted_swag_param = split_base_cls(variables, [res_params_dict],
-                                     *key_list, load_cls=True, base_type="A", mimo=1)
+        # splitted_swag_param = split_base_cls(variables, [res_params_dict],
+        #                              *key_list, load_cls=True, base_type="A", mimo=1)
+        new_variables = load_base_cls(variables, [res_params_dict], load_cls=True, base_type="A", mimo=1)
+        state = state.replace(ema_params=dict(base=new_variables["params"]["base"], 
+                                              cls=new_variables["params"]["cls"], 
+                                              score=state.ema_params["score"]),)
+        assert new_variables["batch_stats"].get("base") is None
+        assert new_variables["batch_stats"].get("cls") is None
         
         labels = batch["labels"]
         drop_rng, score_rng = jax.random.split(state.rng)
@@ -1044,7 +1055,8 @@ def launch(config, print_fn):
             config=config, dsb_stats=dsb_stats, z_dsb_stats=z_dsb_stats, steps=steps)
         logitsC, _zC = model_bd.sample(
             score_rng, _dsb_sample, batch["images"], 
-            base_params=splitted_swag_param["base"], cls_params=splitted_swag_param["cls"])
+            # base_params=splitted_swag_param["base"], cls_params=splitted_swag_param["cls"]
+            )
         logitsC = rearrange(logitsC, "n (t b) z -> t n b z", t=steps+1)
         logitsB = logitsC[0][0]
         logitsC = logitsC[-1][0]
