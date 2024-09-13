@@ -176,7 +176,8 @@ def swag(freq: int, rank: int, start_step: int) -> optax.GradientTransformation:
 
 def sample_swag_diag(num_samples: int, key: chex.PRNGKey, state: SWAGDiagState, eps: float = 1e-30) -> optax.Params:
     mean, tree_unflatten_fn = jax.flatten_util.ravel_pytree(state.mean)
-    std = jnp.sqrt(jnp.clip(state.params2 - jnp.square(mean), a_min=eps))
+    p2, _ = jax.flatten_util.ravel_pytree(state.params2)
+    std = jnp.sqrt(jnp.clip(p2 - jnp.square(mean), a_min=eps))
     
     z = jax.random.normal(key, (num_samples, *mean.shape))
     

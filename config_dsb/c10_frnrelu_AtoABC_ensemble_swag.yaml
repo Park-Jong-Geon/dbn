@@ -32,5 +32,15 @@ joint_depth: 6
 width_multi: 1
 centering: False
 
-num_target_samples: 10
-swag_ckpt_dir: checkpoints/sgd_swag/checkpoint_300
+num_target_samples: 3
+swag_ckpt_dir:
+  ['checkpoints/sgd_swag_156800/checkpoint_300',
+  'checkpoints/sgd_swag_438850/checkpoint_300',
+  'checkpoints/sgd_swag_249130/checkpoint_300',
+  'checkpoints/sgd_swag_959000/checkpoint_300',
+  'checkpoints/sgd_swag_36750/checkpoint_300',
+  'checkpoints/sgd_swag_495000/checkpoint_300',
+  'checkpoints/sgd_swag_203500/checkpoint_300',
+  'checkpoints/sgd_swag_779350/checkpoint_300',
+  'checkpoints/sgd_swag_190430/checkpoint_300',
+  'checkpoints/sgd_swag_130100/checkpoint_300',]
