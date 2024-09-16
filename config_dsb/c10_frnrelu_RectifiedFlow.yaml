@@ -24,7 +24,7 @@ cls_from_scratch: False
 mixup_alpha: 0.4
 forget: 6
 linear_noise: True
-start_temp: 1
+start_temp: 2
 ensemble_prediction: 3
 dsc: True
 input_scaling: 3

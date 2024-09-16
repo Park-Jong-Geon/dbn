@@ -3618,6 +3618,7 @@ class RectifiedFlowBridgeNetwork(nn.Module):
     def conditional_dbn(self, rng, l0, x1, base_params=None, cls_params=None, **kwargs):
         z1 = self.encode(x1, base_params, **kwargs)
         l1 = self.classify(z1, cls_params, **kwargs)
+        l1 = l1 / self.start_temp
         # l1 = self.set_logit(rng, l1, **kwargs)
         l_t, t, _, _, _ = self.forward(rng, l0, l1)
         eps = self.score(l_t, z1, t, **kwargs)
@@ -3642,10 +3643,9 @@ class RectifiedFlowBridgeNetwork(nn.Module):
     def conditional_sample(self, rng, sampler, x):
         zB = self.encode(x, training=False)
         lB = self.classify(zB, training=False)
-        # _lB = lB
+        _lB = lB
+        _lB = _lB / self.start_temp
         # _lB = self.set_logit(rng, _lB, training=False)
-        # lC = sampler(
-        #     partial(self.score, training=False), rng, _lB, zB)
         lC = sampler(
             partial(self.score, training=False), rng, lB, zB)
         lC = lC[None, ...]
