@@ -29,11 +29,11 @@ ensemble_prediction: 3
 dsc: True
 input_scaling: 3
 joint_depth: 6
-width_multi: 1
+width_multi: 2
 centering: False
 rf_eps: 0.001
 
-num_target_samples: 30
+num_target_samples: 3
 swag_ckpt_dir:
   ['checkpoints/sgd_swag_156800/checkpoint_300',
   'checkpoints/sgd_swag_438850/checkpoint_300',

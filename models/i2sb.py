@@ -3448,28 +3448,28 @@ class DiffusionBridgeNetwork(nn.Module):
     def __call__(self, *args, **kwargs):
         return self.conditional_dbn(*args, **kwargs)
 
-    # def set_logit(self, rng, l1, training=True, **kwargs):
-    #     if self.forget == -1: # rebuttal
-    #         l1 = jax.random.normal(rng, l1.shape)
-    #         return l1
-    #     elif self.forget == -2: # rebuttal
-    #         return l1
-    #     elif self.forget == -3: # rebuttal
-    #         return l1/self.start_temp
-    #     T = self.start_temp
-    #     _, temp_rng = jax.random.split(rng)
-    #     if training:
-    #         T += 0.4*jax.random.beta(temp_rng, 1, 5)
-    #     else:
-    #         T += 0.4*(1/6)  # mean of beta distribution
-    #     l1 = l1/T
-    #     return l1
+    def set_logit(self, rng, l1, training=True, **kwargs):
+        if self.forget == -1: # rebuttal
+            l1 = jax.random.normal(rng, l1.shape)
+            return l1
+        elif self.forget == -2: # rebuttal
+            return l1
+        elif self.forget == -3: # rebuttal
+            return l1/self.start_temp
+        T = self.start_temp
+        _, temp_rng = jax.random.split(rng)
+        if training:
+            T += 0.4*jax.random.beta(temp_rng, 1, 5)
+        else:
+            T += 0.4*(1/6)  # mean of beta distribution
+        l1 = l1/T
+        return l1
 
     def conditional_dbn(self, rng, l0, x1, base_params=None, cls_params=None, **kwargs):
         z1 = self.encode(x1, base_params, **kwargs)
         l1 = self.classify(z1, cls_params, **kwargs)
-        l1 = l1 / self.start_temp
-        # l1 = self.set_logit(rng, l1, **kwargs)
+        # l1 = l1 / self.start_temp
+        l1 = self.set_logit(rng, l1, **kwargs)
         l_t, t, mu_t, sigma_t, _ = self.forward(rng, l0, l1)
         eps = self.score(l_t, z1, t, **kwargs)
         _sigma_t = expand_to_broadcast(sigma_t, l_t, axis=1)
@@ -3510,8 +3510,8 @@ class DiffusionBridgeNetwork(nn.Module):
         zB = self.encode(x, base_params, training=False)
         lB = self.classify(zB, cls_params, training=False)
         _lB = lB
-        _lB = _lB / self.start_temp
-        # _lB = self.set_logit(rng, _lB, training=False)
+        # _lB = _lB / self.start_temp
+        _lB = self.set_logit(rng, _lB, training=False)
         lC = sampler(
             partial(self.score, training=False), rng, _lB, zB)
         lC = lC[None, ...]
@@ -3615,6 +3615,14 @@ class RectifiedFlowBridgeNetwork(nn.Module):
     #     l1 = l1/T
     #     return l1
 
+    # def conditional_dbn(self, rng, l0, x1, base_params=None, cls_params=None, **kwargs):
+    #     z1 = self.encode(x1, base_params, **kwargs)
+    #     l1 = self.classify(z1, cls_params, **kwargs)
+    #     l1 = l1 / self.start_temp
+    #     # l1 = self.set_logit(rng, l1, **kwargs)
+    #     l_t, t, _, _, _ = self.forward(rng, l0, l1)
+    #     eps = self.score(l_t, z1, t, **kwargs)
+    #     return (eps, l_t, t, None, None), None
     def conditional_dbn(self, rng, l0, x1, base_params=None, cls_params=None, **kwargs):
         z1 = self.encode(x1, base_params, **kwargs)
         l1 = self.classify(z1, cls_params, **kwargs)
@@ -3622,7 +3630,7 @@ class RectifiedFlowBridgeNetwork(nn.Module):
         # l1 = self.set_logit(rng, l1, **kwargs)
         l_t, t, _, _, _ = self.forward(rng, l0, l1)
         eps = self.score(l_t, z1, t, **kwargs)
-        return (eps, l_t, t, None, None), None
+        return (eps, l1, None, None, None), None
 
     def forward(self, rng, x0, x1, _ts=None, dsb_stats=None):
         if dsb_stats is None:

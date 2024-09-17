@@ -904,18 +904,31 @@ def launch(config, print_fn):
             rngs=rngs_dict,
             **(dict(mutable=mutable) if train else dict()),
         )
+        # new_model_state = output[1] if train else None
+        # (
+        #     epsilon, l_t, t, mu_t, sigma_t
+        # ), logits0eps = output[0] if train else output
+
+        # diff = (l_t-_logitsA)
+        # score_loss = mse_loss(epsilon, diff)
+        # if batch.get("logitsC") is not None:
+        #     logitsC = batch["logitsC"]
+        #     a = config.distill_alpha
+        #     score_loss = (
+        #         a*mse_loss(epsilon, (l_t-logitsC)) + (1-a)*score_loss
+        #     )
         new_model_state = output[1] if train else None
         (
-            epsilon, l_t, t, mu_t, sigma_t
+            epsilon, l1, _, _, _
         ), logits0eps = output[0] if train else output
 
-        diff = (l_t-_logitsA)
+        diff = (l1-_logitsA)
         score_loss = mse_loss(epsilon, diff)
         if batch.get("logitsC") is not None:
             logitsC = batch["logitsC"]
             a = config.distill_alpha
             score_loss = (
-                a*mse_loss(epsilon, (l_t-logitsC)) + (1-a)*score_loss
+                a*mse_loss(epsilon, (l1-logitsC)) + (1-a)*score_loss
             )
         score_loss = reduce_mean(score_loss, batch["marker"])
         total_loss = config.gamma*score_loss
