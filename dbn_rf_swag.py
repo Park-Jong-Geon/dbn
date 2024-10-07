@@ -752,6 +752,12 @@ def launch(config, print_fn):
         return loss
 
     @jax.jit
+    def pseudohuber_loss(noise, output):
+        sum_axis = list(range(1, len(output.shape[1:])+1))
+        loss = jnp.sum(jnp.sqrt((noise-output)**2 + 0.003**2) - 0.003, axis=sum_axis)
+        return loss
+    
+    @jax.jit
     def ce_loss(logits, labels):
         target = common_utils.onehot(labels, num_classes=logits.shape[-1])
         pred = jax.nn.log_softmax(logits, axis=-1)
@@ -923,7 +929,8 @@ def launch(config, print_fn):
         ), logits0eps = output[0] if train else output
 
         diff = (l1-_logitsA)
-        score_loss = mse_loss(epsilon, diff)
+        # score_loss = mse_loss(epsilon, diff)
+        score_loss = pseudohuber_loss(epsilon, diff)
         if batch.get("logitsC") is not None:
             logitsC = batch["logitsC"]
             a = config.distill_alpha
