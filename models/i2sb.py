@@ -3658,3 +3658,114 @@ class RectifiedFlowBridgeNetwork(nn.Module):
             partial(self.score, training=False), rng, _lB, zB)
         lC = lC[None, ...]
         return lC, lB
+
+class DirichletFlowNetwork(nn.Module):
+    base_net: nn.Module
+    score_net: Sequence[nn.Module]
+    cls_net: Sequence[nn.Module]
+    crt_net: Sequence[nn.Module]
+    dsb_stats: Any
+    z_dsb_stats: Any
+    fat: int
+    joint: bool
+    forget: int = 0
+    temp: float = 1.
+    start_temp: float = 1.
+    print_inter: bool = False
+    mimo_cond: bool = False
+    multi_mixup: bool = False
+    continuous: bool = False
+    rand_temp: bool = False
+    centering: bool = False
+    rf_eps: float = None
+
+    def setup(self):
+        self.base = self.base_net()
+        self.score = self.score_net()
+        if self.cls_net is not None:
+            self.cls = self.cls_net()
+        if self.crt_net is not None:
+            self.crt = self.crt_net()
+
+    def encode(self, x, params_dict=None, **kwargs):
+        # x: BxHxWxC
+        if params_dict is not None:
+            out = self.base.apply(params_dict, x, **kwargs)
+        out = self.base(x, **kwargs)
+        return out
+
+    def correct(self, z, **kwargs):
+        if self.crt_net is None:
+            return z
+        return self.crt(z)
+
+    def classify(self, z, params_dict=None, **kwargs):
+        def _classify(cls, _z):
+            if params_dict is not None:
+                return cls.apply(params_dict, _z, **kwargs)
+            return cls(_z, **kwargs)
+        out = _classify(self.cls, z)
+        return out
+
+    def __call__(self, *args, **kwargs):
+        return self.conditional_dbn(*args, **kwargs)
+
+    def conditional_dbn(self, rng, l_label, x, base_params=None, cls_params=None, **kwargs):
+        z = self.encode(x, base_params, **kwargs)
+        self.classify(z, cls_params, **kwargs)
+        x_t, t, u_t = self.forward(rng, l_label)
+        eps = self.score(x_t, z, t, **kwargs)
+        return eps, u_t
+
+    def forward(self, rng, l_label, t=None):
+        num_classes = l_label.shape[1]
+        t_rng, n_rng, d_rng = jax.random.split(rng, 3)
+        if t is None:
+            t = jax.random.exponential(t_rng, (l_label.shape[0],))  # (B,)
+        log_p_ens = jax.nn.log_softmax(l_label, axis=-1)
+        alpha = 1 + t[..., None] * jax.nn.one_hot(jax.random.categorical(n_rng, jnp.exp(log_p_ens)), num_classes)
+        x_t = jax.random.dirichlet(d_rng, alpha)
+        
+        log_p_t = []
+        eye = jnp.eye(num_classes)
+        for i in range(num_classes):
+            alpha = 1 + t[..., None] * eye[i]
+            log_p_t.append(jax.vmap(jax.scipy.stats.dirichlet.logpdf, in_axes=(0, 0))(x_t, alpha))
+        log_p_t = jnp.stack(log_p_t, axis=-1)
+        
+        log_p = log_p_ens + log_p_t
+        log_p = log_p - jax.scipy.special.logsumexp(log_p, -1, keepdims=True)
+        p = jnp.exp(log_p)
+        u_t = jnp.sum(self.u_t(x_t, t, num_classes) * p[..., None], axis=1)
+        return x_t, t, u_t
+
+    def u_t(self, x_t, t, K, h=1e-3):
+        @jax.jit
+        def grad_betainc(a, b, x):
+            f1 = jax.scipy.special.betainc(a+2*h, b, x)
+            f2 = jax.scipy.special.betainc(a+h, b, x)
+            f3 = jax.scipy.special.betainc(a-h, b, x)
+            f4 = jax.scipy.special.betainc(a-2*h, b, x)
+            return (-f1+8*f2-8*f3+f4) / (12*h)
+        
+        log_b = jax.scipy.special.betaln(t+1, K-1)
+        I = jax.vmap(grad_betainc, in_axes=(0, None, 0))(t+1, K-1, x_t)
+        C = - I * jnp.exp(log_b[..., None] - (K-1) * jnp.log(1 - x_t) - t[..., None] * jnp.log(x_t))
+        C = jnp.nan_to_num(C)
+
+        vec = jnp.repeat(jnp.eye(K)[None, ...], x_t.shape[0], axis=0) - jnp.expand_dims(x_t, 1)
+        return vec * C[..., None]
+
+    def sample(self, *args, **kwargs):
+        return self.conditional_sample(*args, **kwargs)
+
+    def conditional_sample(self, rng, sampler, x):
+        zB = self.encode(x, training=False)
+        lB = self.classify(zB, training=False)
+        # _lB = jax.nn.log_softmax(lB, axis=-1)
+        # _lB = jnp.exp(_lB)
+        _lB = jax.random.dirichlet(rng, jnp.ones(lB.shape[1]), (lB.shape[0],))
+        lC = sampler(
+            partial(self.score, training=False), rng, _lB, zB)
+        lC = lC[None, ...]
+        return lC, lB

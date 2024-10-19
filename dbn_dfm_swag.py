@@ -31,7 +31,7 @@ from giung2.models.layers import FilterResponseNorm
 from models.resnet import FlaxResNet, FlaxResNetBase
 from models.resnet import FlaxResNetClassifier3
 from models.bridge import dsb_schedules 
-from models.i2sb import RectifiedFlowBridgeNetwork, ClsUnet
+from models.i2sb import DirichletFlowNetwork, ClsUnet
 from collections import OrderedDict
 from tqdm import tqdm
 from utils import WandbLogger
@@ -411,7 +411,7 @@ def build_dbn(config):
         config.beta1, config.beta2, config.T, linear_noise=config.linear_noise, continuous=config.dsb_continuous)
     score_net = get_scorenet(config)
     crt_net = None
-    dbn = RectifiedFlowBridgeNetwork(
+    dbn = DirichletFlowNetwork(
         base_net=base_net,
         score_net=score_net,
         cls_net=cls_net,
@@ -432,30 +432,43 @@ def build_dbn(config):
     )
     return dbn, (dsb_stats, None)
 
+@jax.jit
+def simplex_proj(seq):
+    """Algorithm from https://arxiv.org/abs/1309.1541 Weiran Wang, Miguel Á. Carreira-Perpiñán"""
+    Y = seq.reshape(-1, seq.shape[-1])
+    N, K = Y.shape
+    X = jnp.flip(jnp.sort(Y, -1), -1)
+    X_cumsum = jnp.cumsum(X, -1) - 1
+    div_seq = jnp.arange(1, K+1)
+    Xtmp = X_cumsum / div_seq
 
-def rf_sample(score, rng, x0, y0=None, config=None, dsb_stats=None, z_dsb_stats=None, steps=None):
+    greater_than_Xtmp = jnp.sum((X > Xtmp), 1, keepdims=True)
+    row_indices = jnp.expand_dims(jnp.arange(N), 1)
+    selected_Xtmp = Xtmp[row_indices, greater_than_Xtmp - 1]
+
+    X = jnp.maximum(Y-selected_Xtmp, jnp.zeros_like(Y))
+    return jnp.reshape(X, seq.shape)
+
+def dfm_sample(score, rng, x0, y0=None, config=None, dsb_stats=None, z_dsb_stats=None, steps=None):
     shape = x0.shape
     batch_size = shape[0]
     n_T = config.T
-    rf_eps = config.rf_eps
-    timesteps = jnp.linspace(rf_eps, 1., n_T)
-    timesteps = jnp.concatenate([jnp.array([0]), timesteps], axis=0)
+    eps = config.rf_eps
+    max_t = config.max_t
+    timesteps = jnp.linspace(eps, max_t, n_T+1)
+    # timesteps = jnp.concatenate([jnp.array([0]), timesteps], axis=0)
 
     @jax.jit
-    def body_fn(n, val):
-        """
-            n in [0, self.n_T - 1]
-        """
-        x_n = val
-        current_t = jnp.array([timesteps[n_T - n]])
-        next_t = jnp.array([timesteps[n_T - n - 1]])
+    def body_fn(n, x_n):
+        current_t = jnp.array([timesteps[n]])
+        next_t = jnp.array([timesteps[n+1]])
         current_t = jnp.tile(current_t, [batch_size])
         next_t = jnp.tile(next_t, [batch_size])
 
         eps = score(x_n, y0, t=current_t)
 
         x_n = x_n + batch_mul(next_t - current_t, eps)
-
+        x_n = simplex_proj(x_n)
         return x_n
 
     x_list = [x0]
@@ -465,7 +478,6 @@ def rf_sample(score, rng, x0, y0=None, config=None, dsb_stats=None, z_dsb_stats=
     for i in range(0, steps):
         val = body_fn(i, val)
         x_list.append(val)
-    x_n = val
 
     return jnp.concatenate(x_list, axis=0)
 
@@ -637,8 +649,8 @@ def launch(config, print_fn):
     variables = dbn.init(
         {"params": init_rng, "dropout": init_rng},
         rng=init_rng,
-        l0=jnp.empty((1, config.num_classes)),
-        x1=jnp.empty((1, *x_dim)),
+        l_label=jnp.empty((1, config.num_classes)),
+        x=jnp.empty((1, *x_dim)),
         training=False
     )
     if variables.get('batch_stats'):
@@ -874,14 +886,14 @@ def launch(config, print_fn):
             rngs_dict = dict(dropout=drop_rng)
             model_bd = dbn.bind(params_dict, rngs=rngs_dict)
             teacher_steps = teacher_config["T"]
-            _rf_sample = partial(
-                rf_sample,
+            _dfm_sample = partial(
+                dfm_sample,
                 config=EasyDict(teacher_config),
                 dsb_stats=teacher_dsb_stats,
                 z_dsb_stats=None,
                 steps=teacher_steps)
             logitsC, _ = model_bd.sample(
-                score_rng, _rf_sample, batch["images"])
+                score_rng, _dfm_sample, batch["images"])
             logitsC = rearrange(
                 logitsC, "n (t b) z -> t b (n z)", t=teacher_steps+1)
             batch["logitsC"] = logitsC[-1]
@@ -903,6 +915,7 @@ def launch(config, print_fn):
             batch_stats=state.batch_stats)
         rngs_dict = dict(dropout=drop_rng)
         mutable = ["batch_stats"]
+        
         output = state.apply_fn(
             params_dict, score_rng,
             _logitsA, batch["images"],
@@ -910,32 +923,16 @@ def launch(config, print_fn):
             rngs=rngs_dict,
             **(dict(mutable=mutable) if train else dict()),
         )
-        # new_model_state = output[1] if train else None
-        # (
-        #     epsilon, l_t, t, mu_t, sigma_t
-        # ), logits0eps = output[0] if train else output
-
-        # diff = (l_t-_logitsA)
-        # score_loss = mse_loss(epsilon, diff)
-        # if batch.get("logitsC") is not None:
-        #     logitsC = batch["logitsC"]
-        #     a = config.distill_alpha
-        #     score_loss = (
-        #         a*mse_loss(epsilon, (l_t-logitsC)) + (1-a)*score_loss
-        #     )
         new_model_state = output[1] if train else None
-        (
-            epsilon, l1, _, _, _
-        ), logits0eps = output[0] if train else output
+        eps, diff  = output[0] if train else output
 
-        diff = (l1-_logitsA)
-        score_loss = mse_loss(epsilon, diff)
+        score_loss = mse_loss(eps, diff)
         # score_loss = pseudohuber_loss(epsilon, diff)
         if batch.get("logitsC") is not None:
             logitsC = batch["logitsC"]
             a = config.distill_alpha
             score_loss = (
-                a*mse_loss(epsilon, (l1-logitsC)) + (1-a)*score_loss
+                a*mse_loss(eps, (l1-logitsC)) + (1-a)*score_loss
             )
         score_loss = reduce_mean(score_loss, batch["marker"])
         total_loss = config.gamma*score_loss
@@ -1019,15 +1016,13 @@ def launch(config, print_fn):
         cum_acc_list = []
         cum_nll_list = []
         prob_sum = 0
-        for i, lg in enumerate(logits):
-            logprob = jax.nn.log_softmax(lg, axis=-1)
-            prob = jnp.exp(logprob)
+        for i, prob in enumerate(logits):
             prob_sum += prob
             if i != 0:  # Not B
                 acc = evaluate_acc(
-                    logprob, labels, log_input=True, reduction="none")
+                    prob, labels, log_input=False, reduction="none")
                 nll = evaluate_nll(
-                    logprob, labels, log_input=True, reduction='none')
+                    prob, labels, log_input=False, reduction='none')
                 acc = reduce_sum(acc, marker)
                 nll = reduce_sum(nll, marker)
                 acc_list.append(acc)
@@ -1076,18 +1071,16 @@ def launch(config, print_fn):
             batch_stats=state.batch_stats)
         rngs_dict = dict(dropout=drop_rng)
         model_bd = dbn.bind(params_dict, rngs=rngs_dict)
-        _rf_sample = partial(
-            rf_sample,
+        _dfm_sample = partial(
+            dfm_sample,
             config=config, dsb_stats=dsb_stats, z_dsb_stats=z_dsb_stats, steps=steps)
         logitsC, _zC = model_bd.sample(
-            score_rng, _rf_sample, batch["images"])
+            score_rng, _dfm_sample, batch["images"])
         logitsC = rearrange(logitsC, "n (t b) z -> t n b z", t=steps+1)
-        logitsB = logitsC[0][0]
-        logitsC = logitsC[-1][0]
 
         (
             acc_list, nll_list, cum_acc_list, cum_nll_list
-        ) = ensemble_accnll([logitsB, logitsC], labels, batch["marker"])
+        ) = ensemble_accnll([logitsC[i][0] for i in range(logitsC.shape[0])], labels, batch["marker"])
         metrics = OrderedDict({
             "count": jnp.sum(batch["marker"]),
         })
