@@ -12,7 +12,7 @@ beta2: 0.0001
 droprate: 0
 ema_decay: 0.99995
 version: v1.1.8
-T: 20
+T: 500
 n_feat: 128
 tag: AtoABC
 fat: 1
@@ -32,7 +32,7 @@ joint_depth: 6
 width_multi: 2
 centering: False
 rf_eps: 0.001
-max_t: 20
+max_t: 500
 
 num_target_samples: 3
 swag_ckpt_dir:

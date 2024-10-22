@@ -428,7 +428,9 @@ def build_dbn(config):
         multi_mixup=False,
         continuous=False,
         centering=False,
-        rf_eps=config.rf_eps
+        rf_eps=config.rf_eps,
+        max_t = config.max_t,
+        steps = config.T
     )
     return dbn, (dsb_stats, None)
 
@@ -455,20 +457,15 @@ def dfm_sample(score, rng, x0, y0=None, config=None, dsb_stats=None, z_dsb_stats
     n_T = config.T
     eps = config.rf_eps
     max_t = config.max_t
-    timesteps = jnp.linspace(eps, max_t, n_T+1)
-    # timesteps = jnp.concatenate([jnp.array([0]), timesteps], axis=0)
+    timesteps = jnp.linspace(0., max_t, n_T+1)
 
     @jax.jit
     def body_fn(n, x_n):
         current_t = jnp.array([timesteps[n]])
-        next_t = jnp.array([timesteps[n+1]])
         current_t = jnp.tile(current_t, [batch_size])
-        next_t = jnp.tile(next_t, [batch_size])
 
         eps = score(x_n, y0, t=current_t)
-
-        x_n = x_n + batch_mul(next_t - current_t, eps)
-        x_n = simplex_proj(x_n)
+        x_n = jax.nn.softmax(eps)
         return x_n
 
     x_list = [x0]
@@ -480,6 +477,37 @@ def dfm_sample(score, rng, x0, y0=None, config=None, dsb_stats=None, z_dsb_stats
         x_list.append(val)
 
     return jnp.concatenate(x_list, axis=0)
+
+# def dfm_sample(score, rng, x0, y0=None, config=None, dsb_stats=None, z_dsb_stats=None, steps=None):
+#     shape = x0.shape
+#     batch_size = shape[0]
+#     n_T = config.T
+#     eps = config.rf_eps
+#     max_t = config.max_t
+#     timesteps = jnp.linspace(eps, max_t, n_T+1)
+
+#     @jax.jit
+#     def body_fn(n, x_n):
+#         current_t = jnp.array([timesteps[n]])
+#         next_t = jnp.array([timesteps[n+1]])
+#         current_t = jnp.tile(current_t, [batch_size])
+#         next_t = jnp.tile(next_t, [batch_size])
+
+#         eps = score(x_n, y0, t=current_t)
+
+#         x_n = x_n + batch_mul(next_t - current_t, eps)
+#         x_n = simplex_proj(x_n)
+#         return x_n
+
+#     x_list = [x0]
+#     val = x0
+#     if steps is None:
+#         steps = n_T
+#     for i in range(0, steps):
+#         val = body_fn(i, val)
+#         x_list.append(val)
+
+#     return jnp.concatenate(x_list, axis=0)
 
 
 def dsb_sample_cont(score, rng, x0, y0=None, config=None, dsb_stats=None, z_dsb_stats=None, steps=None):
@@ -768,7 +796,13 @@ def launch(config, print_fn):
         sum_axis = list(range(1, len(output.shape[1:])+1))
         loss = jnp.sum(jnp.sqrt((noise-output)**2 + 0.003**2) - 0.003, axis=sum_axis)
         return loss
-    
+
+    @jax.jit
+    def ce_loss_with_target(logits, target):
+        pred = jax.nn.log_softmax(logits, axis=-1)
+        loss = -jnp.sum(target*pred, axis=-1)
+        return loss
+
     @jax.jit
     def ce_loss(logits, labels):
         target = common_utils.onehot(labels, num_classes=logits.shape[-1])
@@ -926,8 +960,9 @@ def launch(config, print_fn):
         new_model_state = output[1] if train else None
         eps, diff  = output[0] if train else output
 
-        score_loss = mse_loss(eps, diff)
-        # score_loss = pseudohuber_loss(epsilon, diff)
+        score_loss = ce_loss_with_target(eps, diff) # Assume logit output
+        # score_loss = mse_loss(eps, diff)
+        # score_loss = pseudohuber_loss(eps, diff)
         if batch.get("logitsC") is not None:
             logitsC = batch["logitsC"]
             a = config.distill_alpha
@@ -1078,9 +1113,12 @@ def launch(config, print_fn):
             score_rng, _dfm_sample, batch["images"])
         logitsC = rearrange(logitsC, "n (t b) z -> t n b z", t=steps+1)
 
+        # (
+        #     acc_list, nll_list, cum_acc_list, cum_nll_list
+        # ) = ensemble_accnll([logitsC[i][0] for i in range(logitsC.shape[0])], labels, batch["marker"])
         (
             acc_list, nll_list, cum_acc_list, cum_nll_list
-        ) = ensemble_accnll([logitsC[i][0] for i in range(logitsC.shape[0])], labels, batch["marker"])
+        ) = ensemble_accnll([logitsC[0][0], logitsC[-1][0]], labels, batch["marker"])
         metrics = OrderedDict({
             "count": jnp.sum(batch["marker"]),
         })

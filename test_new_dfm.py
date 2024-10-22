@@ -94,18 +94,24 @@ def convert_coordinate(p):
     y = math.sqrt(jnp.linalg.norm(p - jnp.array([0.5, 0.5, 0]))**2 - jnp.sum(x**2) + 1e-6)
     return x, y
 
+@jax.jit
+def ce_loss_with_target(logits, target):
+    pred = jax.nn.log_softmax(logits, axis=-1)
+    loss = -jnp.sum(target*pred, axis=-1)
+    return loss
+
 if __name__ == '__main__':
     np.set_printoptions(edgeitems=10)
-    T = 200
-    steps = 1000
-    B = 1000
+    T = 100
+    steps = 100
+    B = 50
     C = 10
     
     rng = jax.random.PRNGKey(14)
     rng, new_rng = jax.random.split(rng)
 
     # target = jax.random.dirichlet(rng, jnp.ones(C), (B,))
-    target = jax.nn.softmax(jnp.array([6, 4, -2, 1, 0, 6, 3, -5, 2, 1]))
+    target = jax.nn.softmax(jnp.array([6, 1, -2, 1, 0, 2, 3, -5, 2, 1]))
     target = jnp.tile(target, [B, 1])
     _source, cls = source(new_rng, target, B, C)
     samples = sample(_source, target, cls, T, steps)
@@ -114,8 +120,9 @@ if __name__ == '__main__':
     print(f'target: {target}')
     print(f'matched: {samples[-B:]}')
     
-    print(jnp.mean(jnp.linalg.norm(samples[-B:] - target, axis=-1)))
-    print(jnp.var(jnp.linalg.norm(samples[-B:] - target, axis=-1)))
+    print(f'{ce_loss_with_target(samples[-B:], target)}')
+    # print(jnp.mean(jnp.linalg.norm(samples[-B:] - target, axis=-1)))
+    # print(jnp.var(jnp.linalg.norm(samples[-B:] - target, axis=-1)))
     
     # x, y = convert_coordinate(target[0])
     # traj_x = [x, -1/math.sqrt(2), 1/math.sqrt(2), 0]

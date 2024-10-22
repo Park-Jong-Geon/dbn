@@ -1749,6 +1749,8 @@ class ClsUnet(nn.Module):
             return self._v1_1_14(p, x, t, **kwargs)
         elif self.version == "v1.1.15":
             return self._v1_1_15(p, x, t, **kwargs)
+        elif self.version == "v2.1.1":
+            return self._v2_1_1(p, x, t, **kwargs)
         else:
             raise NotImplementedError
 
@@ -3678,6 +3680,9 @@ class DirichletFlowNetwork(nn.Module):
     rand_temp: bool = False
     centering: bool = False
     rf_eps: float = None
+    max_t: float = None
+    steps: float = None
+    scale: float = 1.
 
     def setup(self):
         self.base = self.base_net()
@@ -3713,59 +3718,71 @@ class DirichletFlowNetwork(nn.Module):
     def conditional_dbn(self, rng, l_label, x, base_params=None, cls_params=None, **kwargs):
         z = self.encode(x, base_params, **kwargs)
         self.classify(z, cls_params, **kwargs)
-        x_t, t, u_t = self.forward(rng, l_label)
+        # x_t, t, u_t = self.forward(rng, l_label)
+        x_t, t, next_x_t = self.forward(rng, l_label)
         eps = self.score(x_t, z, t, **kwargs)
-        return eps, u_t
+        # return eps, u_t
+        return eps, next_x_t
 
     def forward(self, rng, l_label, t=None):
-        num_classes = l_label.shape[1]
+        B = l_label.shape[0]
+        C = l_label.shape[1]
+        
+        # Sample t
         t_rng, n_rng, d_rng = jax.random.split(rng, 3)
         if t is None:
-            t = jax.random.exponential(t_rng, (l_label.shape[0],))  # (B,)
-        log_p_ens = jax.nn.log_softmax(l_label, axis=-1)
-        alpha = 1 + t[..., None] * jax.nn.one_hot(jax.random.categorical(n_rng, jnp.exp(log_p_ens)), num_classes)
+            # t = jax.random.exponential(t_rng, (l_label.shape[0],))  # (B,)
+            t = jax.random.uniform(t_rng, (l_label.shape[0],), maxval=self.max_t)  # (B,)
+        
+        # Sample classes
+        p_ens = jax.nn.softmax(l_label, axis=-1)
+        cls = jax.random.categorical(n_rng, p_ens)
+        e_cls = jax.nn.one_hot(cls, C)
+        alpha = 1 + t[..., None] * e_cls
+        
+        # Sample x_t
         x_t = jax.random.dirichlet(d_rng, alpha)
+        x_t = x_t + x_t[jnp.arange(B), cls][..., None] * (p_ens - e_cls)
         
-        log_p_t = []
-        eye = jnp.eye(num_classes)
-        for i in range(num_classes):
-            alpha = 1 + t[..., None] * eye[i]
-            log_p_t.append(jax.vmap(jax.scipy.stats.dirichlet.logpdf, in_axes=(0, 0))(x_t, alpha))
-        log_p_t = jnp.stack(log_p_t, axis=-1)
+        # Evaluate u_t
+        u_t = self.u_t(x_t, cls, t, p_ens)
+        next_x_t = x_t + (self.max_t / self.steps) * u_t
         
-        log_p = log_p_ens + log_p_t
-        log_p = log_p - jax.scipy.special.logsumexp(log_p, -1, keepdims=True)
-        p = jnp.exp(log_p)
-        u_t = jnp.sum(self.u_t(x_t, t, num_classes) * p[..., None], axis=1)
-        return x_t, t, u_t
+        # return x_t, t, u_t * self.scale
+        return x_t, t, next_x_t
 
-    def u_t(self, x_t, t, K, h=1e-3):
-        @jax.jit
-        def grad_betainc(a, b, x):
-            f1 = jax.scipy.special.betainc(a+2*h, b, x)
-            f2 = jax.scipy.special.betainc(a+h, b, x)
-            f3 = jax.scipy.special.betainc(a-h, b, x)
-            f4 = jax.scipy.special.betainc(a-2*h, b, x)
-            return (-f1+8*f2-8*f3+f4) / (12*h)
-        
+    def grad_betainc(self, a, b, x, h=1e-3):
+        f1 = jax.scipy.special.betainc(a+2*h, b, x)
+        f2 = jax.scipy.special.betainc(a+h, b, x)
+        f3 = jax.scipy.special.betainc(a-h, b, x)
+        f4 = jax.scipy.special.betainc(a-2*h, b, x)
+        return (-f1+8*f2-8*f3+f4) / (12*h)
+
+    def u_t(self, x_t, cls, t, target):        
+        B = x_t.shape[0]
+        K = x_t.shape[-1]
         log_b = jax.scipy.special.betaln(t+1, K-1)
-        I = jax.vmap(grad_betainc, in_axes=(0, None, 0))(t+1, K-1, x_t)
-        C = - I * jnp.exp(log_b[..., None] - (K-1) * jnp.log(1 - x_t) - t[..., None] * jnp.log(x_t))
+        
+        y_j = x_t[jnp.arange(B), cls] / target[jnp.arange(B), cls]
+        
+        I = jax.vmap(self.grad_betainc, in_axes=(0, None, 0))(t+1, K-1, y_j)
+        C = - I * jnp.exp(log_b - (K-1) * jnp.log(1 - y_j) - t * jnp.log(y_j))
         C = jnp.nan_to_num(C)
-
-        vec = jnp.repeat(jnp.eye(K)[None, ...], x_t.shape[0], axis=0) - jnp.expand_dims(x_t, 1)
-        return vec * C[..., None]
+        
+        return C[..., None] * (target - x_t)
 
     def sample(self, *args, **kwargs):
         return self.conditional_sample(*args, **kwargs)
 
+    def _score(self, x_t, z, t, **kwargs):
+        return self.score(x_t, z, t, **kwargs) / self.scale
+
     def conditional_sample(self, rng, sampler, x):
         zB = self.encode(x, training=False)
         lB = self.classify(zB, training=False)
-        # _lB = jax.nn.log_softmax(lB, axis=-1)
-        # _lB = jnp.exp(_lB)
+        # _lB = jax.nn.softmax(lB)
         _lB = jax.random.dirichlet(rng, jnp.ones(lB.shape[1]), (lB.shape[0],))
         lC = sampler(
-            partial(self.score, training=False), rng, _lB, zB)
+            partial(self._score, training=False), rng, _lB, zB)
         lC = lC[None, ...]
         return lC, lB
