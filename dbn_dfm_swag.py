@@ -1081,7 +1081,7 @@ def launch(config, print_fn):
             config=config, dsb_stats=dsb_stats, z_dsb_stats=z_dsb_stats, steps=steps)
         logitsC, _zC = model_bd.sample(
             score_rng, _dfm_sample, batch["images"])
-        logitsC = rearrange(logitsC, "n (t b) z -> t n b z", t=steps+1)
+        logitsC = rearrange(logitsC, "n (t b) z -> t n b z", t=2)
 
         (
             acc_list, nll_list, cum_acc_list, cum_nll_list
