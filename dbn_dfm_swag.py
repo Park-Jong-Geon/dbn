@@ -8,7 +8,6 @@ from typing import Any
 
 import flax
 from flax.training import train_state, common_utils, checkpoints
-from flax.training import dynamic_scale as dynamic_scale_lib
 from flax.core.frozen_dict import freeze
 from flax import jax_utils
 
@@ -35,7 +34,6 @@ from models.i2sb import DirichletFlowNetwork, ClsUnet
 from collections import OrderedDict
 from tqdm import tqdm
 from utils import WandbLogger
-from utils import model_list
 from utils import batch_mul
 from utils import get_config
 from tqdm import tqdm
@@ -43,7 +41,7 @@ from functools import partial
 import defaults_sgd
 from einops import rearrange
 
-from swag import sample_swag, sample_swag_diag
+from swag import sample_swag_diag
 from sgd_swag import update_swag_batch_stats
 from dbn_tidy import load_base_cls
 from collections import namedtuple
@@ -251,22 +249,15 @@ def get_stats(config, dataloaders, base_net, params_dict):
 
 
 def get_scorenet(config):
-    score_input_dim = config.score_input_dim
-    in_channels = score_input_dim[-1]
-    num_channels = in_channels//config.z_dim[-1] * config.n_feat
-
     score_func = partial(
         ClsUnet,
-        num_input=config.fat,
-        p_dim=config.num_classes,
-        z_dim=config.z_dim,
-        ch=num_channels // config.fat,
-        joint=2,
-        depth=config.joint_depth,
-        version=config.version,
-        droprate=config.droprate,
-        input_scaling=config.input_scaling,
-        width_multi=config.width_multi
+        emb_dim=config.emb_dim,
+        prob_embedding_channels=config.prob_embedding_channels,
+        time_embedding_channels=config.time_embedding_channels,
+        imagefeature_embedding_channels=config.imagefeature_embedding_channels,
+        num_blocks=config.num_blocks,
+        num_blocks_for_imagefeature_embedding=config.num_blocks_for_imagefeature_embedding,
+        fourier_scale=config.fourier_scale,
     )
     return score_func
 
@@ -416,40 +407,10 @@ def build_dbn(config):
         score_net=score_net,
         cls_net=cls_net,
         crt_net=crt_net,
-        dsb_stats=dsb_stats,
-        z_dsb_stats=None,
-        fat=1,
-        joint=2,
-        forget=6 if config.forget!=-1 else -1,
-        temp=1.,
-        print_inter=False,
-        mimo_cond=False,
-        start_temp=config.start_temp,
-        multi_mixup=False,
-        continuous=False,
-        centering=False,
-        rf_eps=config.rf_eps,
         max_t = config.max_t,
-        steps = config.T
+        steps = config.T,
     )
     return dbn, (dsb_stats, None)
-
-@jax.jit
-def simplex_proj(seq):
-    """Algorithm from https://arxiv.org/abs/1309.1541 Weiran Wang, Miguel Á. Carreira-Perpiñán"""
-    Y = seq.reshape(-1, seq.shape[-1])
-    N, K = Y.shape
-    X = jnp.flip(jnp.sort(Y, -1), -1)
-    X_cumsum = jnp.cumsum(X, -1) - 1
-    div_seq = jnp.arange(1, K+1)
-    Xtmp = X_cumsum / div_seq
-
-    greater_than_Xtmp = jnp.sum((X > Xtmp), 1, keepdims=True)
-    row_indices = jnp.expand_dims(jnp.arange(N), 1)
-    selected_Xtmp = Xtmp[row_indices, greater_than_Xtmp - 1]
-
-    X = jnp.maximum(Y-selected_Xtmp, jnp.zeros_like(Y))
-    return jnp.reshape(X, seq.shape)
 
 def dfm_sample(score, rng, x0, y0=None, config=None, dsb_stats=None, z_dsb_stats=None, steps=None):
     shape = x0.shape
@@ -477,38 +438,6 @@ def dfm_sample(score, rng, x0, y0=None, config=None, dsb_stats=None, z_dsb_stats
         x_list.append(val)
 
     return jnp.concatenate(x_list, axis=0)
-
-# def dfm_sample(score, rng, x0, y0=None, config=None, dsb_stats=None, z_dsb_stats=None, steps=None):
-#     shape = x0.shape
-#     batch_size = shape[0]
-#     n_T = config.T
-#     eps = config.rf_eps
-#     max_t = config.max_t
-#     timesteps = jnp.linspace(eps, max_t, n_T+1)
-
-#     @jax.jit
-#     def body_fn(n, x_n):
-#         current_t = jnp.array([timesteps[n]])
-#         next_t = jnp.array([timesteps[n+1]])
-#         current_t = jnp.tile(current_t, [batch_size])
-#         next_t = jnp.tile(next_t, [batch_size])
-
-#         eps = score(x_n, y0, t=current_t)
-
-#         x_n = x_n + batch_mul(next_t - current_t, eps)
-#         x_n = simplex_proj(x_n)
-#         return x_n
-
-#     x_list = [x0]
-#     val = x0
-#     if steps is None:
-#         steps = n_T
-#     for i in range(0, steps):
-#         val = body_fn(i, val)
-#         x_list.append(val)
-
-#     return jnp.concatenate(x_list, axis=0)
-
 
 def dsb_sample_cont(score, rng, x0, y0=None, config=None, dsb_stats=None, z_dsb_stats=None, steps=None):
     shape = x0.shape
@@ -960,8 +889,8 @@ def launch(config, print_fn):
         new_model_state = output[1] if train else None
         eps, diff  = output[0] if train else output
 
-        score_loss = ce_loss_with_target(eps, diff) # Assume logit output
-        # score_loss = mse_loss(eps, diff)
+        # score_loss = ce_loss_with_target(eps, diff) # Assume logit output
+        score_loss = mse_loss(eps, diff)
         # score_loss = pseudohuber_loss(eps, diff)
         if batch.get("logitsC") is not None:
             logitsC = batch["logitsC"]
@@ -1009,8 +938,8 @@ def launch(config, print_fn):
         state = state.replace(params=freeze(dict(base=new_variables["params"]["base"], 
                                               cls=new_variables["params"]["cls"], 
                                               score=state.params["score"])),)
-        assert new_variables["batch_stats"].get("base") is None
-        assert new_variables["batch_stats"].get("cls") is None
+        # assert new_variables["batch_stats"].get("base") is None
+        # assert new_variables["batch_stats"].get("cls") is None
 
         (loss, (metrics, new_model_state)), grads = jax.value_and_grad(
             loss_fn, has_aux=True)(state.params)
@@ -1094,8 +1023,8 @@ def launch(config, print_fn):
         state = state.replace(ema_params=dict(base=new_variables["params"]["base"], 
                                               cls=new_variables["params"]["cls"], 
                                               score=state.ema_params["score"]),)
-        assert new_variables["batch_stats"].get("base") is None
-        assert new_variables["batch_stats"].get("cls") is None
+        # assert new_variables["batch_stats"].get("base") is None
+        # assert new_variables["batch_stats"].get("cls") is None
         
         labels = batch["labels"]
         drop_rng, score_rng = jax.random.split(state.rng)

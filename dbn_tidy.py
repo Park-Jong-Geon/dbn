@@ -32,7 +32,7 @@ from models.resnet import FlaxResNet, FlaxResNetBase
 from utils import evaluate_top2acc, evaluate_topNacc, get_single_batch
 from models.resnet import FlaxResNetClassifier3
 from models.bridge import CorrectionModel, FeatureUnet, LatentFeatureUnet, dsb_schedules, MLP
-from models.i2sb import DiffusionBridgeNetwork, TinyUNetModel, UNetModel, MidUNetModel, DiffusionClassifier, ClsUnet
+# from models.i2sb import DiffusionBridgeNetwork, TinyUNetModel, UNetModel, MidUNetModel, DiffusionClassifier, ClsUnet
 from collections import OrderedDict
 from PIL import Image
 from tqdm import tqdm

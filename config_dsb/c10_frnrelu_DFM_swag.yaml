@@ -11,8 +11,7 @@ beta: 0.5
 beta2: 0.0001
 droprate: 0
 ema_decay: 0.99995
-version: v1.1.8
-T: 500
+T: 100
 n_feat: 128
 tag: AtoABC
 fat: 1
@@ -27,12 +26,17 @@ linear_noise: True
 start_temp: 1
 ensemble_prediction: 3
 dsc: True
-input_scaling: 3
-joint_depth: 6
-width_multi: 2
 centering: False
-rf_eps: 0.001
-max_t: 500
+max_t: 100
+
+# MLP-mixer
+emb_dim: 32
+prob_embedding_channels: 4
+time_embedding_channels: 4
+imagefeature_embedding_channels: 8
+num_blocks: 8
+num_blocks_for_imagefeature_embedding: 8
+fourier_scale: 1.
 
 num_target_samples: 3
 swag_ckpt_dir:
