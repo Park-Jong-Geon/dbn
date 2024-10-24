@@ -3678,8 +3678,8 @@ class DirichletFlowNetwork(nn.Module):
     rand_temp: bool = False
     centering: bool = False
     rf_eps: float = None
-    max_t: float = 1000.
-    steps: float = 1000.
+    max_t: float = 20.
+    steps: float = 20.
 
     def setup(self):
         self.base = self.base_net()

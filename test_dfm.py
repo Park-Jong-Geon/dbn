@@ -89,8 +89,8 @@ def sample(rng, target, T, steps, B, C):
 
         eps = u_t(x_n, current_t, target)
         x_n = x_n + batch_mul(next_t - current_t, eps)
-        x_n = jnp.where(x_n < 1e-8, 1e-8, x_n)
-        x_n = x_n / jnp.sum(x_n, axis=-1, keepdims=True)
+        # x_n = jnp.where(x_n < 1e-8, 1e-8, x_n)
+        # x_n = x_n / jnp.sum(x_n, axis=-1, keepdims=True)
         return x_n
     
     x0 = jax.random.dirichlet(rng, jnp.ones(C), (B,))
@@ -99,6 +99,9 @@ def sample(rng, target, T, steps, B, C):
     for i in tqdm(range(0, steps)):
         val = body_fn(i, val)
         x_list.append(jnp.array([val]))
+    
+    val = jax.nn.one_hot(val.argmax(-1), val.shape[-1])
+    x_list.append(jnp.array([val]))
 
     return jnp.concatenate(x_list, axis=0)
 
@@ -109,8 +112,8 @@ def convert_coordinate(p):
 
 if __name__ == '__main__':
     np.set_printoptions(edgeitems=10)
-    T = 54
-    steps = 200
+    T = 50
+    steps = 50
     B = 10000
     C = 10
     rng = jax.random.PRNGKey(1568)

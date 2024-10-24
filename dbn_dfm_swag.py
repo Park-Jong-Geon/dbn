@@ -481,7 +481,10 @@ def dfm_sample(score, rng, x0, y0=None, config=None, dsb_stats=None, z_dsb_stats
         steps = n_T
     for i in range(0, steps):
         val = body_fn(i, val)
-    x_end = val.reshape(batch_size, num_samples, -1).mean(1)
+    
+    x_end = val.reshape(batch_size, num_samples, -1)
+    x_end = jax.nn.one_hot(x_end.argmax(-1), x_end.shape[-1])
+    x_end = x_end.mean(1)
     x_list.append(x_end)
 
     return jnp.concatenate(x_list, axis=0)
@@ -773,7 +776,13 @@ def launch(config, print_fn):
         sum_axis = list(range(1, len(output.shape[1:])+1))
         loss = jnp.sum(jnp.sqrt((noise-output)**2 + 0.003**2) - 0.003, axis=sum_axis)
         return loss
-    
+
+    @jax.jit
+    def ce_loss_with_target(logits, target):
+        pred = jax.nn.log_softmax(logits, axis=-1)
+        loss = -jnp.sum(target*pred, axis=-1)
+        return loss
+
     @jax.jit
     def ce_loss(logits, labels):
         target = common_utils.onehot(labels, num_classes=logits.shape[-1])
@@ -931,7 +940,8 @@ def launch(config, print_fn):
         new_model_state = output[1] if train else None
         eps, diff  = output[0] if train else output
 
-        score_loss = mse_loss(eps, diff)
+        score_loss = ce_loss_with_target(eps, diff)
+        # score_loss = mse_loss(eps, diff)
         # score_loss = pseudohuber_loss(epsilon, diff)
         if batch.get("logitsC") is not None:
             logitsC = batch["logitsC"]
