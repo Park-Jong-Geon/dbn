@@ -428,56 +428,61 @@ def build_dbn(config):
         multi_mixup=False,
         continuous=False,
         centering=False,
-        rf_eps=config.rf_eps
+        rf_eps=config.rf_eps,
+        max_t=config.max_t,
+        steps=config.T,
     )
     return dbn, (dsb_stats, None)
 
-@jax.jit
-def simplex_proj(seq):
-    """Algorithm from https://arxiv.org/abs/1309.1541 Weiran Wang, Miguel Á. Carreira-Perpiñán"""
-    Y = seq.reshape(-1, seq.shape[-1])
-    N, K = Y.shape
-    X = jnp.flip(jnp.sort(Y, -1), -1)
-    X_cumsum = jnp.cumsum(X, -1) - 1
-    div_seq = jnp.arange(1, K+1)
-    Xtmp = X_cumsum / div_seq
+# @jax.jit
+# def simplex_proj(seq):
+#     """Algorithm from https://arxiv.org/abs/1309.1541 Weiran Wang, Miguel Á. Carreira-Perpiñán"""
+#     Y = seq.reshape(-1, seq.shape[-1])
+#     N, K = Y.shape
+#     X = jnp.flip(jnp.sort(Y, -1), -1)
+#     X_cumsum = jnp.cumsum(X, -1) - 1
+#     div_seq = jnp.arange(1, K+1)
+#     Xtmp = X_cumsum / div_seq
 
-    greater_than_Xtmp = jnp.sum((X > Xtmp), 1, keepdims=True)
-    row_indices = jnp.expand_dims(jnp.arange(N), 1)
-    selected_Xtmp = Xtmp[row_indices, greater_than_Xtmp - 1]
+#     greater_than_Xtmp = jnp.sum((X > Xtmp), 1, keepdims=True)
+#     row_indices = jnp.expand_dims(jnp.arange(N), 1)
+#     selected_Xtmp = Xtmp[row_indices, greater_than_Xtmp - 1]
 
-    X = jnp.maximum(Y-selected_Xtmp, jnp.zeros_like(Y))
-    return jnp.reshape(X, seq.shape)
+#     X = jnp.maximum(Y-selected_Xtmp, jnp.zeros_like(Y))
+#     return jnp.reshape(X, seq.shape)
 
 def dfm_sample(score, rng, x0, y0=None, config=None, dsb_stats=None, z_dsb_stats=None, steps=None):
     shape = x0.shape
     batch_size = shape[0]
+    num_samples = config.num_samples
     n_T = config.T
     eps = config.rf_eps
     max_t = config.max_t
     timesteps = jnp.linspace(eps, max_t, n_T+1)
     # timesteps = jnp.concatenate([jnp.array([0]), timesteps], axis=0)
 
+    rep_x0 = x0.repeat(num_samples, 0)
+    rep_y0 = y0.repeat(num_samples, 0)
+
     @jax.jit
     def body_fn(n, x_n):
         current_t = jnp.array([timesteps[n]])
         next_t = jnp.array([timesteps[n+1]])
-        current_t = jnp.tile(current_t, [batch_size])
-        next_t = jnp.tile(next_t, [batch_size])
+        current_t = jnp.tile(current_t, [batch_size*num_samples])
+        next_t = jnp.tile(next_t, [batch_size*num_samples])
 
-        eps = score(x_n, y0, t=current_t)
-
-        x_n = x_n + batch_mul(next_t - current_t, eps)
-        x_n = simplex_proj(x_n)
+        eps = score(x_n, rep_y0, t=current_t)
+        x_n = jax.nn.softmax(eps)
         return x_n
 
     x_list = [x0]
-    val = x0
+    val = rep_x0
     if steps is None:
         steps = n_T
     for i in range(0, steps):
         val = body_fn(i, val)
-        x_list.append(val)
+    x_end = val.reshape(batch_size, num_samples, -1).mean(1)
+    x_list.append(x_end)
 
     return jnp.concatenate(x_list, axis=0)
 

@@ -3678,6 +3678,8 @@ class DirichletFlowNetwork(nn.Module):
     rand_temp: bool = False
     centering: bool = False
     rf_eps: float = None
+    max_t: float = 1000.
+    steps: float = 1000.
 
     def setup(self):
         self.base = self.base_net()
@@ -3713,9 +3715,9 @@ class DirichletFlowNetwork(nn.Module):
     def conditional_dbn(self, rng, l_label, x, base_params=None, cls_params=None, **kwargs):
         z = self.encode(x, base_params, **kwargs)
         self.classify(z, cls_params, **kwargs)
-        x_t, t, u_t = self.forward(rng, l_label)
+        x_t, t, next_x_t = self.forward(rng, l_label)
         eps = self.score(x_t, z, t, **kwargs)
-        return eps, u_t
+        return eps, next_x_t
 
     def forward(self, rng, l_label, t=None):
         num_classes = l_label.shape[1]
@@ -3737,7 +3739,8 @@ class DirichletFlowNetwork(nn.Module):
         log_p = log_p - jax.scipy.special.logsumexp(log_p, -1, keepdims=True)
         p = jnp.exp(log_p)
         u_t = jnp.sum(self.u_t(x_t, t, num_classes) * p[..., None], axis=1)
-        return x_t, t, u_t
+        next_x_t = x_t + (self.max_t / self.steps) * u_t
+        return x_t, t, next_x_t
 
     def u_t(self, x_t, t, K, h=1e-3):
         @jax.jit
